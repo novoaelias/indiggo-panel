@@ -1,103 +1,209 @@
-import { Badge, Card, PageHeader } from "@/components/ui";
-import { colaProduccion, stockItems } from "@/data/mock";
-import type { EstadoTono, ItemStock, OrigenProduccion } from "@/lib/types";
+import { useState } from "react";
+import { Badge, Card, EmptyHint, PageHeader } from "@/components/ui";
+import { api, useApi } from "@/lib/api";
+import type { EstadoTono } from "@/lib/types";
 
-function evaluar(i: ItemStock): { tono: EstadoTono; label: string } {
-  if (i.stockReal === 0) return { tono: "danger", label: "Sin stock" };
-  if (i.stockReal <= Math.ceil(i.minimo * 0.4))
-    return { tono: "danger", label: "Crítico" };
-  if (i.stockReal < i.minimo) return { tono: "warn", label: "Bajo" };
-  return { tono: "ok", label: "OK" };
+interface StockItem {
+  id: string;
+  nombre: string;
+  categoria: string;
+  origen: string;
+  grupo: string | null;
+  stock_real: number;
+  stock_ml: number;
+  stock_minimo: number;
+  estado_tono: EstadoTono;
+  estado_label: string;
+}
+interface StockResp {
+  items: StockItem[];
+  cola: Array<{ id: string; nombre: string; origen: string; cantidad: number }>;
+  bajo_minimo: number;
+  sin_catalogo: boolean;
 }
 
-const origenLabel: Record<OrigenProduccion, string> = {
+const ORIGEN_LABEL: Record<string, string> = {
   impresora3d: "Impresora 3D",
   imprenta: "Imprenta",
+  externo: "Externo",
+  mixto: "Mixto",
 };
 
 export function Stock() {
-  const bajoMinimo = stockItems.filter((i) => i.stockReal < i.minimo).length;
+  const { data, error, loading, reload } = useApi<StockResp>("/stock");
 
   return (
     <div>
       <PageHeader
         titulo="Stock y producción"
-        subtitulo={`${bajoMinimo} ${bajoMinimo === 1 ? "producto" : "productos"} por debajo del mínimo`}
+        subtitulo={
+          data && !data.sin_catalogo
+            ? `${data.bajo_minimo} ${data.bajo_minimo === 1 ? "variante" : "variantes"} por debajo del mínimo`
+            : "Stock real vs. stock publicado en Mercado Libre"
+        }
       />
 
-      <div className="mb-6 rounded-[12px] bg-warn-bg px-4 py-3 text-[13px] text-warn">
-        Datos de ejemplo. Este módulo se conecta cuando derivemos el catálogo de
-        productos desde las publicaciones y cargues el stock físico.
-      </div>
+      {loading && <EmptyHint>Cargando stock…</EmptyHint>}
+      {error && <EmptyHint>No se pudo cargar: {error}</EmptyHint>}
 
-      <div className="grid gap-5 lg:grid-cols-[1.5fr_1fr]">
-        <Card padding={false} className="overflow-hidden">
-          <div className="grid grid-cols-[2fr_1fr_1fr_1fr] border-b hairline px-4 py-3 text-[11.5px] font-semibold uppercase tracking-[0.03em] text-ink/45">
-            <div>Producto</div>
-            <div>Categoría</div>
-            <div className="text-right">Real / ML</div>
-            <div className="text-right">Estado</div>
-          </div>
-          {stockItems.map((i) => {
-            const e = evaluar(i);
-            return (
-              <div
-                key={i.id}
-                className="grid grid-cols-[2fr_1fr_1fr_1fr] items-center border-b hairline px-4 py-3.5 last:border-b-0"
-              >
-                <div className="min-w-0 pr-2">
-                  <div className="truncate text-[13.5px] font-semibold">
-                    {i.nombre}
-                  </div>
-                  <div className="text-[11.5px] text-ink/40">
-                    mín. {i.minimo} · {origenLabel[i.origen]}
-                  </div>
-                </div>
-                <div className="text-[13px] text-ink/55">{i.categoria}</div>
-                <div className="text-right font-display text-[13.5px] font-bold tabular-nums">
-                  {i.stockReal}
-                  <span className="font-sans font-normal text-ink/40">
-                    {" "}
-                    / {i.stockMl}
-                  </span>
-                </div>
-                <div className="flex justify-end">
-                  <Badge tono={e.tono}>{e.label}</Badge>
-                </div>
+      {data?.sin_catalogo && (
+        <EmptyHint>
+          Todavía no hay catálogo. Andá a <b>Configuración → Catálogo</b> y tocá
+          “Derivar desde publicaciones”.
+        </EmptyHint>
+      )}
+
+      {data && !data.sin_catalogo && (
+        <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr]">
+          <Card padding={false} className="overflow-hidden">
+            <div className="grid grid-cols-[2fr_0.8fr_0.8fr_0.8fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+              <div>Variante</div>
+              <div className="text-right">Real</div>
+              <div className="text-right">Mín.</div>
+              <div className="text-right">Estado</div>
+            </div>
+            <div className="max-h-[70vh] overflow-y-auto">
+              {data.items.map((i) => (
+                <StockFila key={i.id} item={i} onSaved={reload} />
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <div className="text-[15px] font-semibold">Producir</div>
+            <div className="mb-4 mt-1 text-[12.5px] text-ink/50">
+              Variantes por debajo del mínimo, agrupadas por origen
+            </div>
+            {data.cola.length === 0 && (
+              <div className="text-[13px] text-ink/45">
+                Nada por debajo del mínimo. 🎉
               </div>
-            );
-          })}
-        </Card>
+            )}
+            {["impresora3d", "imprenta", "externo", "mixto"].map((org) => {
+              const tareas = data.cola.filter((q) => q.origen === org);
+              if (!tareas.length) return null;
+              return (
+                <div key={org} className="mb-4 last:mb-0">
+                  <div className="mb-1.5 text-[12px] font-semibold text-ink/55">
+                    {ORIGEN_LABEL[org] ?? org}
+                  </div>
+                  <div className="flex flex-col">
+                    {tareas.map((q) => (
+                      <label
+                        key={q.id}
+                        className="flex cursor-pointer items-center gap-2.5 border-b hairline py-2 last:border-b-0"
+                      >
+                        <input type="checkbox" className="h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate text-[13px]">
+                          {q.nombre}
+                        </span>
+                        <span className="shrink-0 text-[13px] font-bold text-accent">
+                          ×{q.cantidad}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
 
-        <Card>
-          <div className="text-[15px] font-semibold">Imprimir hoy</div>
-          <div className="mb-4 mt-1 text-[12.5px] text-ink/50">
-            Se armó según stock real y pedidos
-          </div>
-          <div className="flex flex-col">
-            {colaProduccion.map((q) => (
-              <label
-                key={q.id}
-                className="flex cursor-pointer items-center gap-2.5 border-b hairline py-2.5 last:border-b-0"
-              >
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
-                />
-                <span className="min-w-0 flex-1 truncate text-[13.5px]">
-                  {q.nombre}
-                  <span className="ml-1.5 text-[11px] text-ink/40">
-                    {origenLabel[q.origen]}
-                  </span>
-                </span>
-                <span className="shrink-0 text-[13px] font-bold text-accent">
-                  ×{q.cantidad}
-                </span>
-              </label>
-            ))}
-          </div>
-        </Card>
+function StockFila({ item, onSaved }: { item: StockItem; onSaved: () => void }) {
+  return (
+    <div className="grid grid-cols-[2fr_0.8fr_0.8fr_0.8fr] items-center gap-2 border-b hairline px-4 py-2.5 last:border-b-0">
+      <div className="min-w-0 pr-2">
+        <div className="truncate text-[13px] font-semibold">{item.nombre}</div>
+        <div className="text-[11px] text-ink/40">
+          {item.categoria} · publicado {item.stock_ml}
+        </div>
+      </div>
+      <NumeroEditable
+        valor={item.stock_real}
+        onGuardar={(v) =>
+          api(`/stock/${item.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ stock_real: v }),
+          }).then(onSaved)
+        }
+      />
+      <NumeroEditable
+        valor={item.stock_minimo}
+        onGuardar={(v) =>
+          api(`/stock/${item.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ stock_minimo: v }),
+          }).then(onSaved)
+        }
+      />
+      <div className="flex justify-end">
+        <Badge tono={item.estado_tono}>{item.estado_label}</Badge>
       </div>
     </div>
+  );
+}
+
+function NumeroEditable({
+  valor,
+  onGuardar,
+}: {
+  valor: number;
+  onGuardar: (v: number) => Promise<unknown>;
+}) {
+  const [editando, setEditando] = useState(false);
+  const [txt, setTxt] = useState(String(valor));
+  const [guardando, setGuardando] = useState(false);
+
+  async function confirmar() {
+    setEditando(false);
+    const n = Number(txt);
+    if (!Number.isFinite(n) || n < 0 || n === valor) {
+      setTxt(String(valor));
+      return;
+    }
+    setGuardando(true);
+    try {
+      await onGuardar(Math.round(n));
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  if (editando) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        min={0}
+        value={txt}
+        onChange={(e) => setTxt(e.target.value)}
+        onBlur={confirmar}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") confirmar();
+          if (e.key === "Escape") {
+            setTxt(String(valor));
+            setEditando(false);
+          }
+        }}
+        className="w-full rounded-md border border-accent px-1.5 py-1 text-right text-[13px] font-bold tabular-nums outline-none"
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={() => {
+        setTxt(String(valor));
+        setEditando(true);
+      }}
+      className="rounded-md px-1.5 py-1 text-right text-[13.5px] font-bold tabular-nums hover:bg-accent-soft"
+      style={{ opacity: guardando ? 0.5 : 1 }}
+    >
+      {valor}
+    </button>
   );
 }

@@ -30,6 +30,7 @@ export function Configuracion() {
       />
       <div className="flex flex-col gap-8">
         <MercadoLibreSection />
+        <CatalogoSection />
         <GruposSection />
         <ConexionesSection />
       </div>
@@ -199,6 +200,71 @@ function Banner({
         ×
       </button>
     </div>
+  );
+}
+
+function CatalogoSection() {
+  const { data, loading, reload } = useApi<{
+    productos: number;
+    variantes: number;
+    publicaciones: number;
+  }>("/catalogo/resumen");
+  const [corriendo, setCorriendo] = useState(false);
+  const [msg, setMsg] = useState<string>();
+
+  async function derivar() {
+    setCorriendo(true);
+    setMsg(undefined);
+    try {
+      const r = await api<{
+        productos_nuevos: number;
+        variantes_nuevas: number;
+        con_integrante: number;
+        sin_integrante: number;
+        grupos_detectados: Record<string, number>;
+        sin_categoria: string[];
+      }>("/catalogo/derivar", { method: "POST" });
+      setMsg(
+        `+${r.productos_nuevos} productos, +${r.variantes_nuevas} variantes · ` +
+          `${r.con_integrante} variantes con integrante, ${r.sin_integrante} sin. ` +
+          `Grupos: ${Object.entries(r.grupos_detectados)
+            .map(([g, n]) => `${g} (${n})`)
+            .join(", ")}` +
+          (r.sin_categoria.length
+            ? ` · ${r.sin_categoria.length} sin categoría`
+            : ""),
+      );
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setCorriendo(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Catálogo</h2>
+      <Card>
+        <p className="mb-4 max-w-prose text-[13.5px] text-ink/55">
+          El catálogo interno (productos y variantes con su stock) se arma a
+          partir de tus publicaciones de Mercado Libre. Volvé a correrlo cuando
+          agregues publicaciones nuevas: no pisa el stock que ya cargaste.
+        </p>
+        <div className="mb-4 flex flex-wrap gap-4">
+          <Mini label="Publicaciones" value={String(data?.publicaciones ?? "—")} />
+          <Mini label="Productos" value={String(data?.productos ?? "—")} />
+          <Mini label="Variantes" value={String(data?.variantes ?? "—")} />
+        </div>
+        {msg && <div className="mb-3 text-[12.5px] text-ink/60">{msg}</div>}
+        <PrimaryButton onClick={derivar}>
+          {corriendo ? "Derivando…" : "Derivar desde publicaciones"}
+        </PrimaryButton>
+        {loading && (
+          <span className="ml-3 text-[12.5px] text-ink/40">cargando…</span>
+        )}
+      </Card>
+    </section>
   );
 }
 

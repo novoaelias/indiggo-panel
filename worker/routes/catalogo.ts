@@ -1,8 +1,35 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
+import { derivarCatalogo } from "../lib/derivar";
 
 export const catalogo = new Hono<{ Bindings: Env }>();
+
+// Deriva products + product_variants desde el espejo de ML. Idempotente.
+catalogo.post("/derivar", async (c) => {
+  const db = supa(c.env);
+  try {
+    const resumen = await derivarCatalogo(db);
+    return c.json(resumen);
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+catalogo.get("/resumen", async (c) => {
+  const db = supa(c.env);
+  const [{ count: productos }, { count: variantes }, { count: publicaciones }] =
+    await Promise.all([
+      db.from("products").select("id", { count: "exact", head: true }),
+      db.from("product_variants").select("id", { count: "exact", head: true }),
+      db.from("ml_listings").select("id", { count: "exact", head: true }),
+    ]);
+  return c.json({
+    productos: productos ?? 0,
+    variantes: variantes ?? 0,
+    publicaciones: publicaciones ?? 0,
+  });
+});
 
 // --- Grupos e integrantes ---
 catalogo.get("/grupos", async (c) => {

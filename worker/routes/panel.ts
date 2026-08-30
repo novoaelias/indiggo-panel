@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 
@@ -72,6 +73,105 @@ panel.get("/metricas", async (c) => {
   const { data, error } = await db.rpc("panel_metricas", { p_dias: dias });
   if (error) return c.json({ error: error.message }, 500);
   return c.json(data as unknown as MetricasResumen);
+});
+
+// --- Stock y producción ---
+interface VarRow {
+  id: string;
+  etiqueta: string;
+  stock_real: number;
+  stock_ml: number;
+  stock_minimo: number;
+  activo: boolean;
+  products: {
+    nombre: string;
+    categories: { nombre: string; origen: string } | null;
+    groups: { nombre: string } | null;
+  } | null;
+  group_members: { nombre: string } | null;
+}
+
+function evaluarStock(real: number, minimo: number) {
+  if (real <= 0) return { tono: "danger", label: "Sin stock" };
+  if (real <= Math.ceil(minimo * 0.4)) return { tono: "danger", label: "Crítico" };
+  if (real < minimo) return { tono: "warn", label: "Bajo" };
+  return { tono: "ok", label: "OK" };
+}
+
+panel.get("/stock", async (c) => {
+  const db = supa(c.env);
+  const { data, error } = await db
+    .from("product_variants")
+    .select(
+      "id, etiqueta, stock_real, stock_ml, stock_minimo, activo, products(nombre, categories(nombre, origen), groups(nombre)), group_members(nombre)",
+    )
+    .eq("activo", true);
+  if (error) return c.json({ error: error.message }, 500);
+
+  const rows = (data ?? []) as unknown as VarRow[];
+  const items = rows.map((r) => {
+    const prodNombre = r.products?.nombre ?? "—";
+    const esUnico = r.etiqueta === "Único";
+    const nombre = esUnico
+      ? prodNombre
+      : `${prodNombre} — ${r.group_members?.nombre ?? r.etiqueta}`;
+    const ev = evaluarStock(r.stock_real, r.stock_minimo);
+    return {
+      id: r.id,
+      nombre,
+      categoria: r.products?.categories?.nombre ?? "Sin categoría",
+      origen: r.products?.categories?.origen ?? "impresora3d",
+      grupo: r.products?.groups?.nombre ?? null,
+      stock_real: r.stock_real,
+      stock_ml: r.stock_ml,
+      stock_minimo: r.stock_minimo,
+      estado_tono: ev.tono,
+      estado_label: ev.label,
+    };
+  });
+  items.sort((a, b) => a.stock_real - a.stock_minimo - (b.stock_real - b.stock_minimo));
+
+  const cola = items
+    .filter((i) => i.stock_real < i.stock_minimo)
+    .map((i) => ({
+      id: i.id,
+      nombre: i.nombre,
+      origen: i.origen,
+      cantidad: Math.max(i.stock_minimo * 2 - i.stock_real, i.stock_minimo),
+    }));
+
+  return c.json({
+    items,
+    cola,
+    bajo_minimo: items.filter((i) => i.stock_real < i.stock_minimo).length,
+    sin_catalogo: items.length === 0,
+  });
+});
+
+// Editar stock de una variante (Elias carga el stock físico acá).
+panel.patch("/stock/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json<{
+    stock_real?: number;
+    stock_minimo?: number;
+    stock_ml?: number;
+  }>();
+  const patch: Record<string, number> = {};
+  for (const k of ["stock_real", "stock_minimo", "stock_ml"] as const) {
+    const v = body[k];
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0)
+      patch[k] = Math.round(v);
+  }
+  if (!Object.keys(patch).length)
+    return c.json({ error: "nada para actualizar" }, 400);
+
+  const db = supa(c.env);
+  const { error } = await db
+    .from("product_variants")
+    .update(patch as Database["public"]["Tables"]["product_variants"]["Update"])
+    .eq("id", id);
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ ok: true });
 });
 
 // --- Inicio (resumen del día + alertas) ---

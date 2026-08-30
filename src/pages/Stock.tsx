@@ -11,6 +11,7 @@ interface StockItem {
   grupo: string | null;
   stock_real: number;
   stock_ml: number;
+  publicado_ml: number | null;
   stock_minimo: number;
   estado_tono: EstadoTono;
   estado_label: string;
@@ -56,10 +57,11 @@ export function Stock() {
       {data && !data.sin_catalogo && (
         <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr]">
           <Card padding={false} className="overflow-hidden">
-            <div className="grid grid-cols-[2fr_0.8fr_0.8fr_0.8fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+            <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
               <div>Variante</div>
               <div className="text-right">Real</div>
               <div className="text-right">Mín.</div>
+              <div className="text-right">ML</div>
               <div className="text-right">Estado</div>
             </div>
             <div className="max-h-[70vh] overflow-y-auto">
@@ -114,13 +116,25 @@ export function Stock() {
 }
 
 function StockFila({ item, onSaved }: { item: StockItem; onSaved: () => void }) {
+  const [publicando, setPublicando] = useState(false);
+  const desincronizado =
+    item.publicado_ml != null && item.publicado_ml !== item.stock_ml;
+
+  async function publicar() {
+    setPublicando(true);
+    try {
+      await api(`/stock/${item.id}/publicar`, { method: "POST" });
+      onSaved();
+    } finally {
+      setPublicando(false);
+    }
+  }
+
   return (
-    <div className="grid grid-cols-[2fr_0.8fr_0.8fr_0.8fr] items-center gap-2 border-b hairline px-4 py-2.5 last:border-b-0">
+    <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] items-center gap-2 border-b hairline px-4 py-2.5 last:border-b-0">
       <div className="min-w-0 pr-2">
         <div className="truncate text-[13px] font-semibold">{item.nombre}</div>
-        <div className="text-[11px] text-ink/40">
-          {item.categoria} · publicado {item.stock_ml}
-        </div>
+        <div className="text-[11px] text-ink/40">{item.categoria}</div>
       </div>
       <NumeroEditable
         valor={item.stock_real}
@@ -140,6 +154,29 @@ function StockFila({ item, onSaved }: { item: StockItem; onSaved: () => void }) 
           }).then(onSaved)
         }
       />
+      <div className="flex items-center justify-end gap-1.5">
+        {desincronizado &&
+          (publicando ? (
+            <span className="text-[10px] text-ink/40">…</span>
+          ) : (
+            <button
+              onClick={publicar}
+              title={`En ML hay ${item.publicado_ml}. Publicar ${item.stock_ml}.`}
+              className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-bold text-accent"
+            >
+              ↑ ML
+            </button>
+          ))}
+        <NumeroEditable
+          valor={item.stock_ml}
+          onGuardar={(v) =>
+            api(`/stock/${item.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ stock_ml: v }),
+            }).then(onSaved)
+          }
+        />
+      </div>
       <div className="flex justify-end">
         <Badge tono={item.estado_tono}>{item.estado_label}</Badge>
       </div>

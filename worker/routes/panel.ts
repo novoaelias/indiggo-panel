@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
+import { mlFetch } from "../lib/ml";
+import { syncOneItem } from "../lib/sync";
 
 export const panel = new Hono<{ Bindings: Env }>();
 
@@ -78,6 +80,7 @@ panel.get("/metricas", async (c) => {
 // --- Stock y producción ---
 interface VarRow {
   id: string;
+  product_id: string;
   etiqueta: string;
   stock_real: number;
   stock_ml: number;
@@ -103,10 +106,26 @@ panel.get("/stock", async (c) => {
   const { data, error } = await db
     .from("product_variants")
     .select(
-      "id, etiqueta, stock_real, stock_ml, stock_minimo, activo, products(nombre, categories(nombre, origen), groups(nombre)), group_members(nombre)",
+      "id, product_id, etiqueta, stock_real, stock_ml, stock_minimo, activo, products(nombre, categories(nombre, origen), groups(nombre)), group_members(nombre)",
     )
     .eq("activo", true);
   if (error) return c.json({ error: error.message }, 500);
+
+  // valor de stock realmente publicado hoy en ML
+  const [{ data: mlvs }, { data: mls }] = await Promise.all([
+    db.from("ml_listing_variations").select("product_variant_id, cantidad_ml"),
+    db.from("ml_listings").select("product_id, cantidad_ml, tiene_variantes"),
+  ]);
+  const mlPorVariante = new Map(
+    (mlvs ?? [])
+      .filter((v) => v.product_variant_id)
+      .map((v) => [v.product_variant_id as string, v.cantidad_ml]),
+  );
+  const mlPorProducto = new Map(
+    (mls ?? [])
+      .filter((m) => m.product_id && !m.tiene_variantes)
+      .map((m) => [m.product_id as string, m.cantidad_ml]),
+  );
 
   const rows = (data ?? []) as unknown as VarRow[];
   const items = rows.map((r) => {
@@ -116,6 +135,8 @@ panel.get("/stock", async (c) => {
       ? prodNombre
       : `${prodNombre} — ${r.group_members?.nombre ?? r.etiqueta}`;
     const ev = evaluarStock(r.stock_real, r.stock_minimo);
+    const publicadoMl =
+      mlPorVariante.get(r.id) ?? mlPorProducto.get(r.product_id) ?? null;
     return {
       id: r.id,
       nombre,
@@ -124,6 +145,7 @@ panel.get("/stock", async (c) => {
       grupo: r.products?.groups?.nombre ?? null,
       stock_real: r.stock_real,
       stock_ml: r.stock_ml,
+      publicado_ml: publicadoMl,
       stock_minimo: r.stock_minimo,
       estado_tono: ev.tono,
       estado_label: ev.label,
@@ -172,6 +194,79 @@ panel.patch("/stock/:id", async (c) => {
     .eq("id", id);
   if (error) return c.json({ error: error.message }, 500);
   return c.json({ ok: true });
+});
+
+// Resuelve una variante interna a su item/variación de ML.
+async function resolverML(
+  db: ReturnType<typeof supa>,
+  variantId: string,
+): Promise<{ itemId: string; variationId: string | null } | null> {
+  const { data: pv } = await db
+    .from("product_variants")
+    .select("product_id")
+    .eq("id", variantId)
+    .single();
+  if (!pv) return null;
+
+  const { data: mlv } = await db
+    .from("ml_listing_variations")
+    .select("ml_variation_id, ml_listing_id")
+    .eq("product_variant_id", variantId)
+    .maybeSingle();
+
+  if (mlv) {
+    const { data: ml } = await db
+      .from("ml_listings")
+      .select("ml_item_id")
+      .eq("id", mlv.ml_listing_id)
+      .single();
+    return ml
+      ? { itemId: ml.ml_item_id, variationId: mlv.ml_variation_id }
+      : null;
+  }
+
+  const { data: ml } = await db
+    .from("ml_listings")
+    .select("ml_item_id")
+    .eq("product_id", pv.product_id)
+    .limit(1)
+    .maybeSingle();
+  return ml ? { itemId: ml.ml_item_id, variationId: null } : null;
+}
+
+// Publica el stock ML (buffer) de una variante en Mercado Libre.
+panel.post("/stock/:id/publicar", async (c) => {
+  const id = c.req.param("id");
+  const db = supa(c.env);
+
+  const { data: pv } = await db
+    .from("product_variants")
+    .select("stock_ml")
+    .eq("id", id)
+    .single();
+  if (!pv) return c.json({ error: "variante no encontrada" }, 404);
+
+  const ref = await resolverML(db, id);
+  if (!ref)
+    return c.json({ error: "no se pudo mapear a una publicación de ML" }, 409);
+
+  const path = ref.variationId
+    ? `/items/${ref.itemId}/variations/${ref.variationId}`
+    : `/items/${ref.itemId}`;
+  const r = await mlFetch(c.env, db, path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ available_quantity: pv.stock_ml }),
+  });
+  if (!r.ok)
+    return c.json({ error: (await r.text()).slice(0, 250) }, 502);
+
+  try {
+    await syncOneItem(c.env, db, ref.itemId);
+  } catch {
+    /* el push ya se hizo */
+  }
+  return c.json({ ok: true, publicado: pv.stock_ml });
 });
 
 // --- Inicio (resumen del día + alertas) ---

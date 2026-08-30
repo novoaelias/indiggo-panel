@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
+import { catalogo } from "./catalogo";
 
 export const api = new Hono<{ Bindings: Env }>();
 
@@ -8,7 +9,7 @@ api.get("/health", (c) =>
 );
 
 // Estado de las integraciones — el panel lo usa en Configuración.
-// Por ahora sólo reporta si el secreto está presente (no lo expone).
+// Sólo reporta si el secreto está presente (no lo expone).
 api.get("/status", (c) => {
   const has = (v: string | undefined) => Boolean(v && v.length > 0);
   return c.json({
@@ -18,5 +19,7 @@ api.get("/status", (c) => {
     kie: has(c.env.KIE_API_KEY),
   });
 });
+
+api.route("/catalogo", catalogo);
 
 api.all("*", (c) => c.json({ error: "not_found" }, 404));

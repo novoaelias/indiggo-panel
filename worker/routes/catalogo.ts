@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { derivarCatalogo } from "../lib/derivar";
+import { derivarBOM } from "../lib/bom";
 
 export const catalogo = new Hono<{ Bindings: Env }>();
 
@@ -18,17 +19,34 @@ catalogo.post("/derivar", async (c) => {
 
 catalogo.get("/resumen", async (c) => {
   const db = supa(c.env);
-  const [{ count: productos }, { count: variantes }, { count: publicaciones }] =
-    await Promise.all([
-      db.from("products").select("id", { count: "exact", head: true }),
-      db.from("product_variants").select("id", { count: "exact", head: true }),
-      db.from("ml_listings").select("id", { count: "exact", head: true }),
-    ]);
+  const [
+    { count: productos },
+    { count: variantes },
+    { count: publicaciones },
+    { count: insumos },
+  ] = await Promise.all([
+    db.from("products").select("id", { count: "exact", head: true }),
+    db.from("product_variants").select("id", { count: "exact", head: true }),
+    db.from("ml_listings").select("id", { count: "exact", head: true }),
+    db.from("components").select("id", { count: "exact", head: true }),
+  ]);
   return c.json({
     productos: productos ?? 0,
     variantes: variantes ?? 0,
     publicaciones: publicaciones ?? 0,
+    insumos: insumos ?? 0,
   });
+});
+
+// Arma automáticamente la lista de materiales de los holders con variante por
+// integrante (1 cuerpo 3D + 1 photocard de imprenta por variante). Idempotente.
+catalogo.post("/derivar-bom", async (c) => {
+  const db = supa(c.env);
+  try {
+    return c.json(await derivarBOM(db));
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
 });
 
 // --- Grupos e integrantes ---

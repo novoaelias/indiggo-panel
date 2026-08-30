@@ -92,8 +92,16 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
     sin_categoria: [],
   };
 
-  // --- crear productos faltantes ---
-  const nuevosProd: Database["public"]["Tables"]["products"]["Insert"][] = [];
+  // atributos derivados de ML por publicación (categoría/grupo/holder-con-variantes)
+  const derivados = new Map<
+    string,
+    {
+      category_id: string | null;
+      group_id: string | null;
+      variantes_por_integrante: boolean;
+      nombre: string;
+    }
+  >();
   for (const l of listings ?? []) {
     const catSlug = detectar(l.titulo, CATEGORIAS);
     const grupo = detectar(l.titulo, GRUPOS);
@@ -101,15 +109,22 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
       resumen.grupos_detectados[grupo] =
         (resumen.grupos_detectados[grupo] ?? 0) + 1;
     if (!catSlug) resumen.sin_categoria.push(l.titulo);
-
-    if (prodBySku.has(l.ml_item_id)) continue;
-    nuevosProd.push({
-      nombre: l.titulo,
-      sku_base: l.ml_item_id,
+    derivados.set(l.ml_item_id, {
       category_id: catSlug ? (catBySlug.get(catSlug) ?? null) : null,
       group_id: grupo ? (grupoNombreToId.get(grupo) ?? null) : null,
-      variantes_por_integrante: l.tiene_variantes && grupo != null,
+      // sólo los holders reales tienen estructura cuerpo + photocard
+      variantes_por_integrante:
+        catSlug === "holders" && l.tiene_variantes && grupo != null,
+      nombre: l.titulo,
     });
+  }
+
+  // --- crear productos faltantes ---
+  const nuevosProd: Database["public"]["Tables"]["products"]["Insert"][] = [];
+  for (const l of listings ?? []) {
+    if (prodBySku.has(l.ml_item_id)) continue;
+    const d = derivados.get(l.ml_item_id)!;
+    nuevosProd.push({ sku_base: l.ml_item_id, ...d });
   }
   if (nuevosProd.length) {
     const { data, error } = await db
@@ -120,6 +135,21 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
     for (const p of data ?? [])
       if (p.sku_base) prodBySku.set(p.sku_base, p.id);
     resumen.productos_nuevos = data?.length ?? 0;
+  }
+
+  // --- refrescar atributos ML en productos existentes (no toca stock) ---
+  for (const [sku, d] of derivados) {
+    const pid = prodBySku.get(sku);
+    if (pid)
+      await db
+        .from("products")
+        .update({
+          nombre: d.nombre,
+          category_id: d.category_id,
+          group_id: d.group_id,
+          variantes_por_integrante: d.variantes_por_integrante,
+        })
+        .eq("id", pid);
   }
 
   // --- vincular ml_listings.product_id ---

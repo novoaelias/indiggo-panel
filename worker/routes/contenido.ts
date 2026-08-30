@@ -28,6 +28,7 @@ contenido.post("/generar", async (c) => {
   const db = supa(c.env);
 
   let contextoProducto = "un producto de la tienda";
+  const referencias: string[] = [];
   if (body.producto_id) {
     const { data: p } = await db
       .from("products")
@@ -39,7 +40,15 @@ contenido.post("/generar", async (c) => {
       const grp = (p.groups as { nombre?: string } | null)?.nombre;
       contextoProducto = `${p.nombre}${cat ? ` (${cat})` : ""}${grp ? `, grupo ${grp}` : ""}`;
     }
+    const { data: ml } = await db
+      .from("ml_listings")
+      .select("thumbnail, permalink")
+      .eq("product_id", body.producto_id)
+      .limit(1)
+      .maybeSingle();
+    if (ml?.thumbnail) referencias.push(ml.thumbnail.replace(/^http:/, "https:"));
   }
+  const hayRef = referencias.length > 0;
 
   // 1. Claude: prompt de imagen + copy
   const { texto } = await claude(c.env, {
@@ -50,10 +59,11 @@ contenido.post("/generar", async (c) => {
         content: `Producto: ${contextoProducto}
 Plataforma: ${plataforma}
 ${body.objetivo ? `Objetivo: ${body.objetivo}` : ""}
+${hayRef ? "Hay una FOTO DE REFERENCIA del producto real: el prompt de imagen debe pedir mejorar/reencuadrar esa foto (mejor luz, fondo limpio con violeta suave, estética editorial kpop), manteniendo el producto tal cual es." : ""}
 
 Devolvé SOLO este JSON:
 {
-  "prompt_imagen": "prompt EN INGLÉS para generar una foto de producto atractiva tipo flat-lay o lifestyle, estética kpop, colores suaves con violeta, fondo limpio. Detallado, sin texto en la imagen.",
+  "prompt_imagen": "prompt EN INGLÉS para ${hayRef ? "editar la foto de referencia" : "generar una foto de producto tipo flat-lay o lifestyle"}, estética kpop, colores suaves con violeta, fondo limpio. Detallado, sin texto en la imagen.",
   "caption": "texto del posteo en español, 2-4 líneas, con gancho al inicio",
   "hashtags": "8-12 hashtags relevantes separados por espacio, en una línea"
 }`,
@@ -63,10 +73,11 @@ Devolvé SOLO este JSON:
   });
   const gen = parseJsonLaxo<GenIA>(texto);
 
-  // 2. kie.ai: imagen
+  // 2. kie.ai: imagen (con foto de referencia si el producto la tiene)
   const { url, taskId } = await generarImagen(c.env, {
     prompt: gen.prompt_imagen,
     aspectRatio: plataforma === "tiktok" ? "9:16" : "4:5",
+    imageUrls: referencias,
   });
 
   // 3. guardar copia en Storage (la URL de kie expira ~24 h)

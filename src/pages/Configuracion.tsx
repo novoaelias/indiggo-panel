@@ -208,9 +208,32 @@ function CatalogoSection() {
     productos: number;
     variantes: number;
     publicaciones: number;
+    insumos: number;
   }>("/catalogo/resumen");
   const [corriendo, setCorriendo] = useState(false);
   const [msg, setMsg] = useState<string>();
+  const [bom, setBom] = useState(false);
+  const [bomMsg, setBomMsg] = useState<string>();
+
+  async function armarBom() {
+    setBom(true);
+    setBomMsg(undefined);
+    try {
+      const r = await api<{
+        cuerpos: number;
+        photocards: number;
+        vinculos: number;
+      }>("/catalogo/derivar-bom", { method: "POST" });
+      setBomMsg(
+        `${r.cuerpos} cuerpos 3D + ${r.photocards} photocards, ${r.vinculos} vínculos`,
+      );
+      reload();
+    } catch (e) {
+      setBomMsg((e as Error).message);
+    } finally {
+      setBom(false);
+    }
+  }
 
   async function derivar() {
     setCorriendo(true);
@@ -255,11 +278,23 @@ function CatalogoSection() {
           <Mini label="Publicaciones" value={String(data?.publicaciones ?? "—")} />
           <Mini label="Productos" value={String(data?.productos ?? "—")} />
           <Mini label="Variantes" value={String(data?.variantes ?? "—")} />
+          <Mini label="Insumos" value={String(data?.insumos ?? "—")} />
         </div>
         {msg && <div className="mb-3 text-[12.5px] text-ink/60">{msg}</div>}
-        <PrimaryButton onClick={derivar}>
-          {corriendo ? "Derivando…" : "Derivar desde publicaciones"}
-        </PrimaryButton>
+        {bomMsg && <div className="mb-3 text-[12.5px] text-ink/60">{bomMsg}</div>}
+        <div className="flex flex-wrap gap-2.5">
+          <PrimaryButton onClick={derivar}>
+            {corriendo ? "Derivando…" : "Derivar desde publicaciones"}
+          </PrimaryButton>
+          <GhostButton onClick={armarBom}>
+            {bom ? "Armando…" : "Armar lista de materiales"}
+          </GhostButton>
+        </div>
+        <p className="mt-3 text-[11.5px] text-ink/40">
+          La lista de materiales asume 1 cuerpo impreso en 3D + 1 photocard de
+          imprenta por cada variante de holder. Ajustá las cantidades reales en
+          Stock → Insumos.
+        </p>
         {loading && (
           <span className="ml-3 text-[12.5px] text-ink/40">cargando…</span>
         )}

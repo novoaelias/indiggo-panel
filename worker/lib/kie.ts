@@ -23,6 +23,8 @@ export interface ImagenOpts {
   prompt: string;
   aspectRatio?: "1:1" | "4:5" | "9:16" | "16:9" | "3:4";
   model?: string;
+  /** Fotos de referencia (usa nano-banana-edit si hay al menos una). */
+  imageUrls?: string[];
 }
 
 /** Genera una imagen y devuelve la URL temporal de kie.ai (expira ~24 h). */
@@ -35,13 +37,18 @@ export async function generarImagen(
     "content-type": "application/json",
   };
 
+  const refs = (opts.imageUrls ?? []).filter(Boolean).slice(0, 10);
+  const model =
+    opts.model ?? (refs.length ? "google/nano-banana-edit" : "google/nano-banana");
+
   const crear = await fetch(`${BASE}/createTask`, {
     method: "POST",
     headers,
     body: JSON.stringify({
-      model: opts.model ?? "google/nano-banana",
+      model,
       input: {
         prompt: opts.prompt.slice(0, 5000),
+        ...(refs.length ? { image_urls: refs } : {}),
         output_format: "png",
         aspect_ratio: opts.aspectRatio ?? "4:5",
         nsfw_checker: false,

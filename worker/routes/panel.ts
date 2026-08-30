@@ -4,6 +4,7 @@ import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
 import { syncOneItem } from "../lib/sync";
+import { planificar } from "../lib/bom";
 
 export const panel = new Hono<{ Bindings: Env }>();
 
@@ -267,6 +268,44 @@ panel.post("/stock/:id/publicar", async (c) => {
     /* el push ya se hizo */
   }
   return c.json({ ok: true, publicado: pv.stock_ml });
+});
+
+// --- Planificador de producción (explota el BOM) ---
+panel.get("/produccion", async (c) => {
+  const db = supa(c.env);
+  return c.json(await planificar(db));
+});
+
+// --- Insumos (componentes: cuerpos 3D, photocards) ---
+panel.get("/componentes", async (c) => {
+  const db = supa(c.env);
+  const { data, error } = await db
+    .from("components")
+    .select("id, nombre, origen, stock_real, stock_minimo")
+    .order("origen")
+    .order("nombre");
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ componentes: data });
+});
+
+panel.patch("/componentes/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json<{ stock_real?: number; stock_minimo?: number }>();
+  const patch: Record<string, number> = {};
+  for (const k of ["stock_real", "stock_minimo"] as const) {
+    const v = body[k];
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0)
+      patch[k] = Math.round(v);
+  }
+  if (!Object.keys(patch).length)
+    return c.json({ error: "nada para actualizar" }, 400);
+  const db = supa(c.env);
+  const { error } = await db
+    .from("components")
+    .update(patch as Database["public"]["Tables"]["components"]["Update"])
+    .eq("id", id);
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ ok: true });
 });
 
 // --- Inicio (resumen del día + alertas) ---

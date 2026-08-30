@@ -63,6 +63,14 @@ npx wrangler secret bulk .dev.vars   # sube los secretos al Worker desplegado
    (publicaciones + variantes + pedidos de los últimos 60 días).
 
 El `access_token` (6 h) se refresca solo por cron cada 4 h; el sync corre cada hora.
+ML también notifica en tiempo real a `/api/ml/notifications`.
+
+## Seguridad
+
+Ver [`docs/seguridad.md`](docs/seguridad.md). Resumen:
+
+1. **Clave del panel** (ya en el código): `npx wrangler secret put PANEL_TOKEN`
+2. **Cloudflare Access** (login con Google): se configura una vez en el dashboard de Zero Trust.
 
 ## Estructura
 

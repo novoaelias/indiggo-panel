@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { clearPanelToken, getPanelToken } from "./auth";
 
 export class ApiError extends Error {
   constructor(
@@ -10,13 +11,20 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getPanelToken();
   const res = await fetch(`/api${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
+      ...(token ? { "x-panel-token": token } : {}),
       ...(init?.headers ?? {}),
     },
   });
+  if (res.status === 401 && !path.startsWith("/session")) {
+    clearPanelToken();
+    window.location.reload();
+    throw new ApiError(401, "sesión expirada");
+  }
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
   if (!res.ok) {

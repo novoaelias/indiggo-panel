@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { MobileDrawer, Sidebar } from "./components/Sidebar";
 import { Logo } from "./components/Logo";
+import { Gate } from "./components/Gate";
 import { IconMenu } from "./components/icons";
 import { Inicio } from "./pages/Inicio";
 import { Publicaciones } from "./pages/Publicaciones";
@@ -11,6 +12,14 @@ import { Contenido } from "./pages/Contenido";
 import { Configuracion } from "./pages/Configuracion";
 
 export function App() {
+  return (
+    <Gate>
+      <Panel />
+    </Gate>
+  );
+}
+
+function Panel() {
   const [drawer, setDrawer] = useState(false);
   const location = useLocation();
 

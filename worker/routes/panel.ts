@@ -5,6 +5,7 @@ import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
 import { syncOneItem } from "../lib/sync";
 import { planificar } from "../lib/bom";
+import { regenerarAlertas } from "../lib/alertas";
 
 export const panel = new Hono<{ Bindings: Env }>();
 
@@ -270,6 +271,72 @@ panel.post("/stock/:id/publicar", async (c) => {
   return c.json({ ok: true, publicado: pv.stock_ml });
 });
 
+// Publica en ML el buffer de todas las variantes que están desincronizadas.
+panel.post("/stock/publicar-todo", async (c) => {
+  const db = supa(c.env);
+
+  const { data: vars } = await db
+    .from("product_variants")
+    .select("id, stock_ml, product_id")
+    .eq("activo", true);
+
+  const [{ data: mlvs }, { data: mls }] = await Promise.all([
+    db.from("ml_listing_variations").select("product_variant_id, cantidad_ml"),
+    db.from("ml_listings").select("product_id, cantidad_ml, tiene_variantes"),
+  ]);
+  const mlPorVar = new Map(
+    (mlvs ?? [])
+      .filter((v) => v.product_variant_id)
+      .map((v) => [v.product_variant_id as string, v.cantidad_ml]),
+  );
+  const mlPorProd = new Map(
+    (mls ?? [])
+      .filter((m) => m.product_id && !m.tiene_variantes)
+      .map((m) => [m.product_id as string, m.cantidad_ml]),
+  );
+
+  const pendientes = (vars ?? []).filter((v) => {
+    const live = mlPorVar.get(v.id) ?? mlPorProd.get(v.product_id) ?? null;
+    return live != null && live !== v.stock_ml;
+  });
+
+  let ok = 0;
+  const errores: string[] = [];
+  const itemsTocados = new Set<string>();
+
+  for (const v of pendientes.slice(0, 120)) {
+    const ref = await resolverML(db, v.id);
+    if (!ref) {
+      errores.push(`${v.id}: sin mapeo`);
+      continue;
+    }
+    const path = ref.variationId
+      ? `/items/${ref.itemId}/variations/${ref.variationId}`
+      : `/items/${ref.itemId}`;
+    const r = await mlFetch(c.env, db, path, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ available_quantity: v.stock_ml }),
+    });
+    if (r.ok) {
+      ok++;
+      itemsTocados.add(ref.itemId);
+    } else {
+      errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 120)}`);
+    }
+  }
+
+  for (const it of itemsTocados) {
+    try {
+      await syncOneItem(c.env, db, it);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return c.json({ pendientes: pendientes.length, publicados: ok, errores });
+});
+
 // --- Planificador de producción (explota el BOM) ---
 panel.get("/produccion", async (c) => {
   const db = supa(c.env);
@@ -308,19 +375,22 @@ panel.patch("/componentes/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-// --- Inicio (resumen del día + alertas) ---
+// --- Inicio (resumen del día + alertas de la tabla) ---
+const TONO_POR_SEV: Record<string, "ok" | "warn" | "danger" | "info"> = {
+  ok: "ok",
+  warn: "warn",
+  danger: "danger",
+  info: "info",
+};
+
 panel.get("/inicio", async (c) => {
   const db = supa(c.env);
   const hoy = new Date().toISOString().slice(0, 10);
   const hace7 = new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
 
-  const [ventasHoy, ventasSemana, listings, ultimosPedidos, revisiones] =
+  const [ventasHoy, ventasSemana, listings, ultimosPedidos, alertasRows] =
     await Promise.all([
-      db
-        .from("ml_orders")
-        .select("total")
-        .eq("estado", "paid")
-        .gte("fecha", hoy),
+      db.from("ml_orders").select("total").eq("estado", "paid").gte("fecha", hoy),
       db
         .from("ml_orders")
         .select("total")
@@ -333,62 +403,37 @@ panel.get("/inicio", async (c) => {
         .order("fecha", { ascending: false })
         .limit(5),
       db
-        .from("ml_listings")
-        .select("titulo, estado")
-        .neq("estado", "active")
-        .limit(20),
+        .from("alerts")
+        .select("tipo, severidad, titulo, detalle")
+        .is("resuelta_at", null)
+        .order("created_at", { ascending: false })
+        .limit(12),
     ]);
 
   const sum = (rows: { total: number | null }[] | null) =>
     (rows ?? []).reduce((s, r) => s + (r.total ?? 0), 0);
-
   const activas =
     listings.data?.filter((l) => l.estado === "active").length ?? 0;
-  const pausadas = (listings.data?.length ?? 0) - activas;
 
-  const alertas: Array<{
-    tono: "ok" | "warn" | "danger" | "info";
-    titulo: string;
-    texto: string;
-  }> = [];
-
-  const enRevision =
-    revisiones.data?.filter((l) => l.estado === "under_review") ?? [];
-  const otrasPausadas =
-    revisiones.data?.filter((l) => l.estado !== "under_review") ?? [];
-
-  if (enRevision.length)
-    alertas.push({
-      tono: "warn",
-      titulo: `${enRevision.length} publicación(es) en revisión`,
-      texto: enRevision
-        .slice(0, 3)
-        .map((l) => l.titulo)
-        .join(" · "),
-    });
-  if (otrasPausadas.length)
-    alertas.push({
-      tono: "danger",
-      titulo: `${otrasPausadas.length} publicación(es) pausadas o cerradas`,
-      texto: otrasPausadas
-        .slice(0, 3)
-        .map((l) => l.titulo)
-        .join(" · "),
-    });
-  if (!alertas.length)
-    alertas.push({
-      tono: "ok",
-      titulo: "Todo en orden",
-      texto: "No hay publicaciones pausadas ni en revisión.",
-    });
+  const alertas = (alertasRows.data ?? []).map((a) => ({
+    tono: TONO_POR_SEV[a.severidad] ?? "info",
+    titulo: a.titulo,
+    texto: a.detalle ?? "",
+  }));
 
   return c.json({
     ventas_hoy: sum(ventasHoy.data),
     pedidos_hoy: ventasHoy.data?.length ?? 0,
     ventas_semana: sum(ventasSemana.data),
     publicaciones_activas: activas,
-    publicaciones_pausadas: pausadas,
+    publicaciones_pausadas: (listings.data?.length ?? 0) - activas,
     ultimos_pedidos: ultimosPedidos.data ?? [],
     alertas,
   });
+});
+
+panel.post("/alertas/regenerar", async (c) => {
+  const db = supa(c.env);
+  const n = await regenerarAlertas(db);
+  return c.json({ ok: true, alertas: n });
 });

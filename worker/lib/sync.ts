@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/database.types";
 import type { Env } from "../env";
 import { getToken, mlFetch } from "./ml";
+import { regenerarAlertas } from "./alertas";
 
 type DB = SupabaseClient<Database>;
 
@@ -325,6 +326,10 @@ export async function syncAll(env: Env, db: DB): Promise<SyncResult> {
     .from("integrations")
     .update({ meta: meta as Json })
     .eq("provider", "mercadolibre");
+
+  await regenerarAlertas(db).catch((e) =>
+    errores.push(`alertas: ${(e as Error).message}`),
+  );
 
   return out;
 }

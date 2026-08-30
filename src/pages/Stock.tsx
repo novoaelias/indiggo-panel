@@ -55,8 +55,23 @@ export function Stock() {
   const stock = useApi<StockResp>("/stock");
   const plan = useApi<Plan>("/produccion");
   const [tab, setTab] = useState<"variantes" | "insumos">("variantes");
+  const [pushAll, setPushAll] = useState(false);
 
   const d = stock.data;
+  const desync =
+    d?.items.filter(
+      (i) => i.publicado_ml != null && i.publicado_ml !== i.stock_ml,
+    ).length ?? 0;
+
+  async function publicarTodo() {
+    setPushAll(true);
+    try {
+      await api("/stock/publicar-todo", { method: "POST" });
+      stock.reload();
+    } finally {
+      setPushAll(false);
+    }
+  }
 
   return (
     <div>
@@ -82,7 +97,7 @@ export function Stock() {
       {d && !d.sin_catalogo && (
         <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr]">
           <div>
-            <div className="mb-3 flex gap-1.5">
+            <div className="mb-3 flex items-center gap-1.5">
               {(["variantes", "insumos"] as const).map((t) => (
                 <button
                   key={t}
@@ -97,6 +112,15 @@ export function Stock() {
                   {t}
                 </button>
               ))}
+              {tab === "variantes" && desync > 0 && (
+                <button
+                  onClick={publicarTodo}
+                  disabled={pushAll}
+                  className="ml-auto rounded-lg bg-accent px-3 py-2 text-[12.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+                >
+                  {pushAll ? "Publicando…" : `Publicar ${desync} en ML`}
+                </button>
+              )}
             </div>
 
             {tab === "variantes" ? (

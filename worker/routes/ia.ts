@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { claude, parseJsonLaxo } from "../lib/claude";
+import { mlFetch } from "../lib/ml";
+import { syncOneItem } from "../lib/sync";
 
 export const ia = new Hono<{ Bindings: Env }>();
 
@@ -81,4 +83,56 @@ Devolvé SOLO un objeto JSON con esta forma exacta:
   } catch (e) {
     return c.json({ error: (e as Error).message }, 502);
   }
+});
+
+// Aplica cambios a Mercado Libre. Se llama SÓLO cuando Elias confirma en el panel.
+ia.post("/publicacion/:id/aplicar", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json<{ titulo?: string; descripcion?: string }>();
+
+  const db = supa(c.env);
+  const { data: l, error } = await db
+    .from("ml_listings")
+    .select("ml_item_id")
+    .eq("id", id)
+    .single();
+  if (error || !l) return c.json({ error: "publicación no encontrada" }, 404);
+
+  const aplicado: string[] = [];
+  const errores: string[] = [];
+
+  if (body.titulo?.trim()) {
+    const r = await mlFetch(c.env, db, `/items/${l.ml_item_id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: body.titulo.trim().slice(0, 60) }),
+    });
+    if (r.ok) aplicado.push("título");
+    else errores.push(`título: ${(await r.text()).slice(0, 200)}`);
+  }
+
+  if (body.descripcion?.trim()) {
+    const r = await mlFetch(
+      c.env,
+      db,
+      `/items/${l.ml_item_id}/description`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ plain_text: body.descripcion.trim() }),
+      },
+    );
+    if (r.ok) aplicado.push("descripción");
+    else errores.push(`descripción: ${(await r.text()).slice(0, 200)}`);
+  }
+
+  if (aplicado.length) {
+    try {
+      await syncOneItem(c.env, db, l.ml_item_id);
+    } catch (e) {
+      errores.push(`re-sync: ${(e as Error).message}`);
+    }
+  }
+
+  return c.json({ aplicado, errores }, errores.length && !aplicado.length ? 502 : 200);
 });

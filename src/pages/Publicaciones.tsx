@@ -55,7 +55,7 @@ export function Publicaciones() {
     return p.toString();
   }, [filtro, busqueda]);
 
-  const { data, error, loading } = useApi<Resp>(
+  const { data, error, loading, reload } = useApi<Resp>(
     `/publicaciones${qs ? `?${qs}` : ""}`,
   );
   const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
@@ -66,6 +66,10 @@ export function Publicaciones() {
         <SugerenciaModal
           publicacion={iaPara}
           onClose={() => setIaPara(null)}
+          onAplicado={() => {
+            setIaPara(null);
+            reload();
+          }}
         />
       )}
       <PageHeader
@@ -187,15 +191,51 @@ interface Sugerencia {
 function SugerenciaModal({
   publicacion,
   onClose,
+  onAplicado,
 }: {
   publicacion: PublicacionApi;
   onClose: () => void;
+  onAplicado: () => void;
 }) {
   const [objetivo, setObjetivo] = useState("");
   const [cargando, setCargando] = useState(false);
   const [sug, setSug] = useState<Sugerencia>();
   const [err, setErr] = useState<string>();
   const [copiado, setCopiado] = useState<string>();
+  const [aplicando, setAplicando] = useState(false);
+
+  async function aplicar() {
+    if (!sug) return;
+    if (
+      !window.confirm(
+        "Se va a cambiar el título y la descripción de esta publicación en Mercado Libre. ¿Confirmás?",
+      )
+    )
+      return;
+    setAplicando(true);
+    setErr(undefined);
+    try {
+      const r = await api<{ aplicado: string[]; errores: string[] }>(
+        `/ia/publicacion/${publicacion.id}/aplicar`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            titulo: sug.titulo,
+            descripcion: sug.descripcion,
+          }),
+        },
+      );
+      if (r.errores.length && !r.aplicado.length) {
+        setErr(r.errores.join(" · "));
+      } else {
+        onAplicado();
+      }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setAplicando(false);
+    }
+  }
 
   async function generar() {
     setCargando(true);
@@ -294,10 +334,18 @@ function SugerenciaModal({
                 {sug.notas}
               </div>
             )}
-            <p className="text-[11.5px] text-ink/40">
-              Revisá y copiá lo que sirva. Todavía no se aplica solo a Mercado
-              Libre.
-            </p>
+            <div className="flex flex-wrap items-center gap-3 border-t hairline pt-4">
+              <button
+                onClick={aplicar}
+                disabled={aplicando}
+                className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                {aplicando ? "Aplicando…" : "Aplicar a Mercado Libre"}
+              </button>
+              <span className="text-[11.5px] text-ink/40">
+                Cambia título y descripción en la publicación real.
+              </span>
+            </div>
           </div>
         )}
       </div>

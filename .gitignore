@@ -1,0 +1,9 @@
+node_modules
+dist
+.dev.vars
+.wrangler
+*.local
+.DS_Store
+npm-debug.log*
+.vite
+worker-configuration.d.ts

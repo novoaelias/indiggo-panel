@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "indiggo-panel",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "<tu-account-id-cloudflare>",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    // ML refresca el access_token cada ~6h (expira en 6h). Corre cada 4h.
+    // Chequeo de stock/producción una vez por hora.
+    "crons": ["0 */4 * * *", "15 * * * *"]
+  },
+  "vars": {
+    "ENVIRONMENT": "production"
+  }
+}

@@ -1,0 +1,89 @@
+import { NavLink } from "react-router-dom";
+import { NAV } from "./nav";
+import { Logo } from "./Logo";
+import { cx } from "./ui";
+
+function NavItems({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <nav className="flex flex-col gap-0.5">
+      {NAV.map(({ to, label, icon: Icon }) => (
+        <NavLink
+          key={to}
+          to={to}
+          end={to === "/"}
+          onClick={onNavigate}
+          className={({ isActive }) =>
+            cx(
+              "flex items-center gap-[11px] rounded-[9px] px-3 py-2.5 text-[13.5px] font-semibold transition-colors",
+              isActive
+                ? "bg-accent-soft text-accent"
+                : "text-ink/[0.62] hover:bg-ink/[0.03]",
+            )
+          }
+        >
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+            <Icon />
+          </span>
+          <span>{label}</span>
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
+function Footer() {
+  return (
+    <div className="mt-auto flex flex-col gap-0.5 border-t hairline px-2.5 pt-3">
+      <div className="text-[12.5px] font-semibold">Indiggo Store</div>
+      <div className="text-[11.5px] text-ink/45">Panel privado</div>
+    </div>
+  );
+}
+
+/** Sidebar fijo — visible en desktop (>= lg). */
+export function Sidebar() {
+  return (
+    <aside className="sticky top-0 hidden h-screen w-[236px] shrink-0 flex-col gap-7 border-r hairline bg-surface px-4 py-7 lg:flex">
+      <Logo />
+      <NavItems />
+      <Footer />
+    </aside>
+  );
+}
+
+/** Drawer para mobile. */
+export function MobileDrawer({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className={cx(
+        "fixed inset-0 z-50 lg:hidden",
+        open ? "pointer-events-auto" : "pointer-events-none",
+      )}
+      aria-hidden={!open}
+    >
+      <div
+        onClick={onClose}
+        className={cx(
+          "absolute inset-0 bg-ink/30 transition-opacity",
+          open ? "opacity-100" : "opacity-0",
+        )}
+      />
+      <div
+        className={cx(
+          "absolute left-0 top-0 flex h-full w-[248px] flex-col gap-7 border-r hairline bg-surface px-4 py-7 transition-transform",
+          open ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <Logo />
+        <NavItems onNavigate={onClose} />
+        <Footer />
+      </div>
+    </div>
+  );
+}

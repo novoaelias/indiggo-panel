@@ -125,24 +125,28 @@ export function Stock() {
 
             {tab === "variantes" ? (
               <Card padding={false} className="overflow-hidden">
-                <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
-                  <div>Variante</div>
-                  <div className="text-right">Real</div>
-                  <div className="text-right">Mín.</div>
-                  <div className="text-right">ML</div>
-                  <div className="text-right">Estado</div>
-                </div>
-                <div className="max-h-[70vh] overflow-y-auto">
-                  {d.items.map((i) => (
-                    <StockFila
-                      key={i.id}
-                      item={i}
-                      onSaved={() => {
-                        stock.reload();
-                        plan.reload();
-                      }}
-                    />
-                  ))}
+                <div className="overflow-x-auto">
+                  <div className="min-w-[480px]">
+                    <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+                      <div>Variante</div>
+                      <div className="text-right">Real</div>
+                      <div className="text-right">Mín.</div>
+                      <div className="text-right">ML</div>
+                      <div className="text-right">Estado</div>
+                    </div>
+                    <div className="max-h-[70vh] overflow-y-auto">
+                      {d.items.map((i) => (
+                        <StockFila
+                          key={i.id}
+                          item={i}
+                          onSaved={() => {
+                            stock.reload();
+                            plan.reload();
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </Card>
             ) : (

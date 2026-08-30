@@ -118,6 +118,8 @@ interface MetricasResumen {
   ventas_totales: number;
   pedidos: number;
   ticket_promedio: number;
+  ventas_prev: number;
+  pedidos_prev: number;
   por_dia: Array<{ dia: string; monto: number; pedidos: number }>;
   top: Array<{ nombre: string; unidades: number; ingreso: number }>;
 }

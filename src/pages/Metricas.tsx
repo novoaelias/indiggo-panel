@@ -8,8 +8,16 @@ interface MetricasData {
   ventas_totales: number;
   pedidos: number;
   ticket_promedio: number;
+  ventas_prev: number;
+  pedidos_prev: number;
   por_dia: Array<{ dia: string; monto: number; pedidos: number }>;
   top: Array<{ nombre: string; unidades: number; ingreso: number }>;
+}
+
+function delta(actual: number, prev: number): string | null {
+  if (!prev) return null;
+  const pct = Math.round(((actual - prev) / prev) * 100);
+  return `${pct >= 0 ? "+" : ""}${pct}%`;
 }
 
 const DIA_CORTO = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
@@ -50,12 +58,20 @@ export function Metricas() {
       {data && (
         <>
           <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-3">
-            <Kpi label="Ventas totales" value={formatARS(data.ventas_totales)} />
+            <Kpi
+              label="Ventas totales"
+              value={formatARS(data.ventas_totales)}
+              delta={delta(data.ventas_totales, data.ventas_prev)}
+            />
             <Kpi
               label="Ticket promedio"
               value={formatARS(data.ticket_promedio)}
             />
-            <Kpi label="Pedidos" value={String(data.pedidos)} />
+            <Kpi
+              label="Pedidos"
+              value={String(data.pedidos)}
+              delta={delta(data.pedidos, data.pedidos_prev)}
+            />
           </div>
 
           <Card className="mb-6">
@@ -125,11 +141,37 @@ export function Metricas() {
   );
 }
 
-function Kpi({ label, value }: { label: string; value: string }) {
+function Kpi({
+  label,
+  value,
+  delta,
+}: {
+  label: string;
+  value: string;
+  delta?: string | null;
+}) {
+  const positivo = delta?.startsWith("+");
   return (
     <Card>
       <div className="mb-2 text-[12.5px] text-ink/50">{label}</div>
-      <div className="font-display text-[22px] font-bold">{value}</div>
+      <div className="flex items-baseline gap-2">
+        <span className="font-display text-[22px] font-bold">{value}</span>
+        {delta && (
+          <span
+            className={cx(
+              "text-[12px] font-semibold",
+              positivo ? "text-ok" : "text-danger",
+            )}
+          >
+            {delta}
+          </span>
+        )}
+      </div>
+      {delta && (
+        <div className="mt-0.5 text-[11px] text-ink/40">
+          vs. período anterior
+        </div>
+      )}
     </Card>
   );
 }

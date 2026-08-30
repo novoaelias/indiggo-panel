@@ -85,6 +85,155 @@ Devolvé SOLO un objeto JSON con esta forma exacta:
   }
 });
 
+interface Propuesta {
+  titulo: string;
+  descripcion: string;
+  palabras_clave: string[];
+  precio_sugerido: number | null;
+}
+
+// Genera una propuesta de publicación nueva a partir de una idea. Read-only:
+// no crea nada en ML.
+ia.post("/nueva", async (c) => {
+  const body = await c.req.json<{ idea?: string; precio?: number }>();
+  const idea = body.idea?.trim();
+  if (!idea) return c.json({ error: "contá qué querés vender" }, 400);
+
+  const db = supa(c.env);
+
+  const { texto } = await claude(c.env, {
+    system: CONTEXTO_INDIGGO,
+    messages: [
+      {
+        role: "user",
+        content: `Quiero publicar esto: ${idea}
+${body.precio ? `Precio objetivo: $${body.precio}` : ""}
+
+Devolvé SOLO este JSON:
+{
+  "titulo": "título optimizado, máx 60 caracteres",
+  "descripcion": "descripción completa con viñetas (guiones)",
+  "palabras_clave": ["term1", "term2", "..."],
+  "precio_sugerido": número en pesos argentinos o null
+}`,
+      },
+    ],
+    maxTokens: 1400,
+  });
+  const p = parseJsonLaxo<Propuesta>(texto);
+  if (p.titulo && p.titulo.length > 60) p.titulo = p.titulo.slice(0, 60).trim();
+
+  // categoría sugerida por ML
+  let categoria: { id: string; nombre: string } | null = null;
+  const atributosRequeridos: Array<{ id: string; nombre: string }> = [];
+  try {
+    const r = await mlFetch(
+      c.env,
+      db,
+      `/sites/MLA/domain_discovery/search?limit=1&q=${encodeURIComponent(p.titulo || idea)}`,
+    );
+    if (r.ok) {
+      const arr = (await r.json()) as Array<{
+        category_id?: string;
+        category_name?: string;
+      }>;
+      if (arr[0]?.category_id) {
+        categoria = { id: arr[0].category_id, nombre: arr[0].category_name ?? "" };
+        const ra = await mlFetch(
+          c.env,
+          db,
+          `/categories/${arr[0].category_id}/attributes`,
+        );
+        if (ra.ok) {
+          const attrs = (await ra.json()) as Array<{
+            id: string;
+            name: string;
+            tags?: Record<string, boolean>;
+          }>;
+          for (const a of attrs)
+            if (a.tags?.required)
+              atributosRequeridos.push({ id: a.id, nombre: a.name });
+        }
+      }
+    }
+  } catch {
+    /* la categoría la elige Elias si falla */
+  }
+
+  return c.json({
+    propuesta: p,
+    categoria,
+    atributos_requeridos: atributosRequeridos.slice(0, 12),
+  });
+});
+
+// Crea la publicación en Mercado Libre EN PAUSA (Elias la activa desde ML tras
+// revisarla). Se llama sólo con confirmación explícita en el panel.
+ia.post("/publicar", async (c) => {
+  const body = await c.req.json<{
+    titulo?: string;
+    descripcion?: string;
+    categoria_id?: string;
+    precio?: number;
+    stock?: number;
+    pictures?: string[];
+    atributos?: Array<{ id: string; value_name: string }>;
+  }>();
+
+  if (!body.titulo || !body.categoria_id || !body.precio) {
+    return c.json({ error: "faltan título, categoría o precio" }, 400);
+  }
+
+  const db = supa(c.env);
+  const item = {
+    title: body.titulo.slice(0, 60),
+    category_id: body.categoria_id,
+    price: body.precio,
+    currency_id: "ARS",
+    available_quantity: Math.max(body.stock ?? 1, 1),
+    buying_mode: "buy_it_now",
+    condition: "new",
+    listing_type_id: "gold_special",
+    pictures: (body.pictures ?? [])
+      .filter(Boolean)
+      .slice(0, 10)
+      .map((source) => ({ source })),
+    attributes: (body.atributos ?? []).filter((a) => a.id && a.value_name),
+  };
+
+  const r = await mlFetch(c.env, db, "/items", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(item),
+  });
+  const creado = (await r.json()) as { id?: string; permalink?: string };
+  if (!r.ok || !creado.id) {
+    return c.json({ error: JSON.stringify(creado).slice(0, 400) }, 502);
+  }
+
+  // pausar + descripción
+  await mlFetch(c.env, db, `/items/${creado.id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "paused" }),
+  });
+  if (body.descripcion?.trim()) {
+    await mlFetch(c.env, db, `/items/${creado.id}/description`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ plain_text: body.descripcion.trim() }),
+    });
+  }
+
+  try {
+    await syncOneItem(c.env, db, creado.id);
+  } catch {
+    /* ya está creada */
+  }
+
+  return c.json({ ml_item_id: creado.id, permalink: creado.permalink ?? null });
+});
+
 // Aplica cambios a Mercado Libre. Se llama SÓLO cuando Elias confirma en el panel.
 ia.post("/publicacion/:id/aplicar", async (c) => {
   const id = c.req.param("id");

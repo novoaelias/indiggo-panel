@@ -59,6 +59,7 @@ export function Publicaciones() {
     `/publicaciones${qs ? `?${qs}` : ""}`,
   );
   const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
+  const [nueva, setNueva] = useState(false);
 
   return (
     <div>
@@ -72,6 +73,15 @@ export function Publicaciones() {
           }}
         />
       )}
+      {nueva && (
+        <NuevaPublicacionModal
+          onClose={() => setNueva(false)}
+          onCreada={() => {
+            setNueva(false);
+            reload();
+          }}
+        />
+      )}
       <PageHeader
         titulo="Publicaciones"
         subtitulo={
@@ -79,12 +89,7 @@ export function Publicaciones() {
             ? `${data.conteo.todas ?? 0} en total · ${data.conteo.active ?? 0} activas`
             : "Sincronizadas desde Mercado Libre"
         }
-        acciones={
-          <>
-            <GhostButton>Editar precios en lote</GhostButton>
-            <PrimaryButton>+ Crear con IA</PrimaryButton>
-          </>
-        }
+        acciones={<PrimaryButton onClick={() => setNueva(true)}>+ Crear con IA</PrimaryButton>}
       />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -377,6 +382,271 @@ function Campo({
       </div>
       <div className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px]">
         {children}
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 text-[12.5px] text-ink/50">{label}</div>
+      <div className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px]">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+interface PropuestaNueva {
+  propuesta: {
+    titulo: string;
+    descripcion: string;
+    palabras_clave: string[];
+    precio_sugerido: number | null;
+  };
+  categoria: { id: string; nombre: string } | null;
+  atributos_requeridos: Array<{ id: string; nombre: string }>;
+}
+
+function NuevaPublicacionModal({
+  onClose,
+  onCreada,
+}: {
+  onClose: () => void;
+  onCreada: () => void;
+}) {
+  const [idea, setIdea] = useState("");
+  const [precioObj, setPrecioObj] = useState("");
+  const [cargando, setCargando] = useState(false);
+  const [err, setErr] = useState<string>();
+  const [prop, setProp] = useState<PropuestaNueva>();
+
+  const [titulo, setTitulo] = useState("");
+  const [descripcion, setDescripcion] = useState("");
+  const [categoriaId, setCategoriaId] = useState("");
+  const [precio, setPrecio] = useState("");
+  const [stock, setStock] = useState("1");
+  const [fotos, setFotos] = useState("");
+  const [attrs, setAttrs] = useState<Record<string, string>>({});
+  const [publicando, setPublicando] = useState(false);
+  const [resultado, setResultado] = useState<{ permalink: string | null }>();
+
+  async function generar(e: React.FormEvent) {
+    e.preventDefault();
+    setCargando(true);
+    setErr(undefined);
+    try {
+      const r = await api<PropuestaNueva>("/ia/nueva", {
+        method: "POST",
+        body: JSON.stringify({
+          idea: idea.trim(),
+          precio: precioObj ? Number(precioObj) : undefined,
+        }),
+      });
+      setProp(r);
+      setTitulo(r.propuesta.titulo);
+      setDescripcion(r.propuesta.descripcion);
+      setCategoriaId(r.categoria?.id ?? "");
+      setPrecio(String(r.propuesta.precio_sugerido ?? precioObj ?? ""));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  async function publicar() {
+    if (
+      !window.confirm(
+        "Se va a crear la publicación en Mercado Libre EN PAUSA. La revisás y activás desde ML. ¿Confirmás?",
+      )
+    )
+      return;
+    setPublicando(true);
+    setErr(undefined);
+    try {
+      const r = await api<{ permalink: string | null }>("/ia/publicar", {
+        method: "POST",
+        body: JSON.stringify({
+          titulo,
+          descripcion,
+          categoria_id: categoriaId,
+          precio: Number(precio),
+          stock: Number(stock) || 1,
+          pictures: fotos
+            .split(/\s+/)
+            .map((s) => s.trim())
+            .filter(Boolean),
+          atributos: Object.entries(attrs)
+            .filter(([, v]) => v.trim())
+            .map(([id, value_name]) => ({ id, value_name })),
+        }),
+      });
+      setResultado(r);
+      onCreada();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setPublicando(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+      <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
+        <div className="mb-4 flex items-start justify-between">
+          <h2 className="text-[16px] font-semibold">Crear publicación con IA</h2>
+          <button
+            onClick={onClose}
+            className="text-[18px] font-bold text-ink/40 hover:text-ink"
+          >
+            ×
+          </button>
+        </div>
+
+        {resultado ? (
+          <div className="flex flex-col gap-3 text-[13.5px]">
+            <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
+              Publicación creada <b>en pausa</b>. Revisala y activala en Mercado
+              Libre.
+            </div>
+            {resultado.permalink && (
+              <a
+                href={resultado.permalink}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-accent"
+              >
+                Abrir en Mercado Libre →
+              </a>
+            )}
+            <PrimaryButton onClick={onClose}>Cerrar</PrimaryButton>
+          </div>
+        ) : !prop ? (
+          <form onSubmit={generar} className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[12.5px] text-ink/50">
+                ¿Qué querés vender?
+              </span>
+              <textarea
+                autoFocus
+                value={idea}
+                onChange={(e) => setIdea(e.target.value)}
+                rows={3}
+                placeholder="ej: llavero 3D con el logo de NewJeans, PLA, 5cm"
+                className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[12.5px] text-ink/50">
+                Precio objetivo (opcional)
+              </span>
+              <input
+                value={precioObj}
+                onChange={(e) => setPrecioObj(e.target.value)}
+                inputMode="numeric"
+                className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
+              />
+            </label>
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            <PrimaryButton>
+              {cargando ? "Generando…" : "Generar propuesta"}
+            </PrimaryButton>
+          </form>
+        ) : (
+          <div className="flex flex-col gap-4">
+            <Field label={`Título (${titulo.length}/60)`}>
+              <input
+                value={titulo}
+                maxLength={60}
+                onChange={(e) => setTitulo(e.target.value)}
+                className="w-full bg-transparent outline-none"
+              />
+            </Field>
+            <Field label="Descripción">
+              <textarea
+                value={descripcion}
+                onChange={(e) => setDescripcion(e.target.value)}
+                rows={7}
+                className="w-full resize-y bg-transparent outline-none"
+              />
+            </Field>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field
+                label={`Categoría${prop.categoria ? ` · ${prop.categoria.nombre}` : ""}`}
+              >
+                <input
+                  value={categoriaId}
+                  onChange={(e) => setCategoriaId(e.target.value)}
+                  className="w-full bg-transparent outline-none"
+                />
+              </Field>
+              <Field label="Precio">
+                <input
+                  value={precio}
+                  onChange={(e) => setPrecio(e.target.value)}
+                  inputMode="numeric"
+                  className="w-full bg-transparent outline-none"
+                />
+              </Field>
+              <Field label="Stock inicial">
+                <input
+                  value={stock}
+                  onChange={(e) => setStock(e.target.value)}
+                  inputMode="numeric"
+                  className="w-full bg-transparent outline-none"
+                />
+              </Field>
+            </div>
+            <Field label="URLs de fotos (una por línea)">
+              <textarea
+                value={fotos}
+                onChange={(e) => setFotos(e.target.value)}
+                rows={2}
+                placeholder="https://…"
+                className="w-full resize-y bg-transparent outline-none"
+              />
+            </Field>
+            {prop.atributos_requeridos.length > 0 && (
+              <div>
+                <div className="mb-1.5 text-[12.5px] text-ink/50">
+                  Atributos que pide la categoría
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {prop.atributos_requeridos.map((a) => (
+                    <Field key={a.id} label={a.nombre}>
+                      <input
+                        value={attrs[a.id] ?? ""}
+                        onChange={(e) =>
+                          setAttrs((s) => ({ ...s, [a.id]: e.target.value }))
+                        }
+                        className="w-full bg-transparent outline-none"
+                      />
+                    </Field>
+                  ))}
+                </div>
+              </div>
+            )}
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            <div className="flex flex-wrap items-center gap-3 border-t hairline pt-4">
+              <button
+                onClick={publicar}
+                disabled={publicando}
+                className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                {publicando ? "Creando…" : "Crear en Mercado Libre (en pausa)"}
+              </button>
+              <GhostButton onClick={() => setProp(undefined)}>Volver</GhostButton>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

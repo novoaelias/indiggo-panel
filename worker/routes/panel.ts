@@ -61,6 +61,57 @@ panel.get("/publicaciones", async (c) => {
   return c.json({ publicaciones, conteo });
 });
 
+// Actualiza precios en lote. body: { cambios: [{ id, precio }] } (id = ml_listings.id)
+panel.post("/publicaciones/precios", async (c) => {
+  const body = await c.req.json<{
+    cambios?: Array<{ id: string; precio: number }>;
+  }>();
+  const cambios = (body.cambios ?? []).filter(
+    (x) => x.id && Number.isFinite(x.precio) && x.precio > 0,
+  );
+  if (!cambios.length) return c.json({ error: "sin cambios" }, 400);
+
+  const db = supa(c.env);
+  const { data: listings } = await db
+    .from("ml_listings")
+    .select("id, ml_item_id")
+    .in(
+      "id",
+      cambios.map((x) => x.id),
+    );
+  const itemPorId = new Map((listings ?? []).map((l) => [l.id, l.ml_item_id]));
+
+  let ok = 0;
+  const errores: string[] = [];
+  const tocados = new Set<string>();
+  for (const cambio of cambios.slice(0, 200)) {
+    const itemId = itemPorId.get(cambio.id);
+    if (!itemId) {
+      errores.push(`${cambio.id}: no encontrado`);
+      continue;
+    }
+    const r = await mlFetch(c.env, db, `/items/${itemId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ price: Math.round(cambio.precio) }),
+    });
+    if (r.ok) {
+      ok++;
+      tocados.add(itemId);
+    } else {
+      errores.push(`${itemId}: ${(await r.text()).slice(0, 120)}`);
+    }
+  }
+  for (const it of tocados) {
+    try {
+      await syncOneItem(c.env, db, it);
+    } catch {
+      /* ignore */
+    }
+  }
+  return c.json({ actualizados: ok, errores });
+});
+
 // --- Métricas ---
 interface MetricasResumen {
   dias: number;

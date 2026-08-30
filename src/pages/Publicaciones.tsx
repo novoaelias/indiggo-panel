@@ -60,6 +60,7 @@ export function Publicaciones() {
   );
   const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
   const [nueva, setNueva] = useState(false);
+  const [precios, setPrecios] = useState(false);
 
   return (
     <div>
@@ -82,6 +83,15 @@ export function Publicaciones() {
           }}
         />
       )}
+      {precios && (
+        <PreciosModal
+          onClose={() => setPrecios(false)}
+          onAplicado={() => {
+            setPrecios(false);
+            reload();
+          }}
+        />
+      )}
       <PageHeader
         titulo="Publicaciones"
         subtitulo={
@@ -89,7 +99,16 @@ export function Publicaciones() {
             ? `${data.conteo.todas ?? 0} en total · ${data.conteo.active ?? 0} activas`
             : "Sincronizadas desde Mercado Libre"
         }
-        acciones={<PrimaryButton onClick={() => setNueva(true)}>+ Crear con IA</PrimaryButton>}
+        acciones={
+          <>
+            <GhostButton onClick={() => setPrecios(true)}>
+              Editar precios
+            </GhostButton>
+            <PrimaryButton onClick={() => setNueva(true)}>
+              + Crear con IA
+            </PrimaryButton>
+          </>
+        }
       />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -647,6 +666,142 @@ function NuevaPublicacionModal({
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function PreciosModal({
+  onClose,
+  onAplicado,
+}: {
+  onClose: () => void;
+  onAplicado: () => void;
+}) {
+  const { data } = useApi<Resp>("/publicaciones?estado=active");
+  const [nuevos, setNuevos] = useState<Record<string, string>>({});
+  const [pct, setPct] = useState("");
+  const [aplicando, setAplicando] = useState(false);
+  const [msg, setMsg] = useState<string>();
+
+  const lista = data?.publicaciones ?? [];
+
+  function aplicarPct() {
+    const p = Number(pct);
+    if (!Number.isFinite(p) || p === 0) return;
+    const next: Record<string, string> = {};
+    for (const it of lista) {
+      if (it.precio == null) continue;
+      next[it.id] = String(Math.round(it.precio * (1 + p / 100)));
+    }
+    setNuevos(next);
+  }
+
+  const cambios = lista
+    .filter((it) => {
+      const v = nuevos[it.id];
+      return v != null && Number(v) > 0 && Number(v) !== it.precio;
+    })
+    .map((it) => ({ id: it.id, precio: Number(nuevos[it.id]) }));
+
+  async function aplicar() {
+    if (
+      !window.confirm(
+        `Se van a cambiar ${cambios.length} precios en Mercado Libre. ¿Confirmás?`,
+      )
+    )
+      return;
+    setAplicando(true);
+    setMsg(undefined);
+    try {
+      const r = await api<{ actualizados: number; errores: string[] }>(
+        "/publicaciones/precios",
+        { method: "POST", body: JSON.stringify({ cambios }) },
+      );
+      setMsg(
+        `${r.actualizados} actualizados` +
+          (r.errores.length ? ` · ${r.errores.length} errores` : ""),
+      );
+      if (r.actualizados) onAplicado();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setAplicando(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+      <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
+        <div className="mb-4 flex items-start justify-between">
+          <h2 className="text-[16px] font-semibold">Editar precios</h2>
+          <button
+            onClick={onClose}
+            className="text-[18px] font-bold text-ink/40 hover:text-ink"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-[12.5px] text-ink/50">Ajuste masivo:</span>
+          <input
+            value={pct}
+            onChange={(e) => setPct(e.target.value)}
+            placeholder="ej: 10 o -5"
+            inputMode="numeric"
+            className="w-24 rounded-lg border border-ink/12 px-2.5 py-1.5 text-[13px] outline-none focus:border-accent"
+          />
+          <span className="text-[12.5px] text-ink/50">%</span>
+          <GhostButton onClick={aplicarPct}>Aplicar a todas</GhostButton>
+          {Object.keys(nuevos).length > 0 && (
+            <button
+              onClick={() => setNuevos({})}
+              className="text-[12px] text-ink/40 hover:text-ink"
+            >
+              limpiar
+            </button>
+          )}
+        </div>
+
+        <div className="max-h-[55vh] overflow-y-auto rounded-[12px] border hairline">
+          {lista.map((it) => (
+            <div
+              key={it.id}
+              className="flex items-center gap-3 border-b hairline px-3 py-2 last:border-b-0"
+            >
+              <span className="min-w-0 flex-1 truncate text-[13px]">
+                {it.titulo}
+              </span>
+              <span className="w-20 shrink-0 text-right text-[12.5px] text-ink/45">
+                {it.precio != null ? formatARS(it.precio) : "—"}
+              </span>
+              <input
+                value={nuevos[it.id] ?? ""}
+                onChange={(e) =>
+                  setNuevos((s) => ({ ...s, [it.id]: e.target.value }))
+                }
+                placeholder="nuevo"
+                inputMode="numeric"
+                className="w-24 shrink-0 rounded-md border border-ink/12 px-2 py-1 text-right text-[13px] outline-none focus:border-accent"
+              />
+            </div>
+          ))}
+        </div>
+
+        {msg && <div className="mt-3 text-[12.5px] text-ink/60">{msg}</div>}
+
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            onClick={aplicar}
+            disabled={aplicando || cambios.length === 0}
+            className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+          >
+            {aplicando
+              ? "Aplicando…"
+              : `Aplicar ${cambios.length || ""} a Mercado Libre`}
+          </button>
+        </div>
       </div>
     </div>
   );

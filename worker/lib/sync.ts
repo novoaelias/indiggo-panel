@@ -138,7 +138,10 @@ async function syncPublicaciones(
             moneda: it.currency_id ?? "ARS",
             cantidad_ml: it.available_quantity,
             permalink: it.permalink,
-            thumbnail: it.secure_thumbnail ?? it.thumbnail,
+            thumbnail: (it.secure_thumbnail ?? it.thumbnail)?.replace(
+              /^http:/,
+              "https:",
+            ),
             tiene_variantes: (it.variations?.length ?? 0) > 0,
             ml_actualizado_at: it.last_updated,
             sincronizado_at: ahora,

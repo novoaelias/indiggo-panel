@@ -1,53 +1,73 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import {
   Badge,
   Card,
+  EmptyHint,
   GhostButton,
   PageHeader,
   PrimaryButton,
   cx,
 } from "@/components/ui";
-import { publicaciones } from "@/data/mock";
+import { useApi } from "@/lib/api";
 import { formatARS } from "@/lib/format";
-import type { EstadoPublicacion, EstadoTono } from "@/lib/types";
+import type { EstadoTono } from "@/lib/types";
 
-const FILTROS: Array<{ key: "todas" | EstadoPublicacion; label: string }> = [
+interface PublicacionApi {
+  id: string;
+  ml_item_id: string;
+  titulo: string;
+  estado: string;
+  precio: number | null;
+  moneda: string;
+  permalink: string | null;
+  thumbnail: string | null;
+  variantes: number;
+  stock_ml: number;
+}
+interface Resp {
+  publicaciones: PublicacionApi[];
+  conteo: Record<string, number>;
+}
+
+const ESTADO_META: Record<string, { label: string; tono: EstadoTono }> = {
+  active: { label: "Activa", tono: "ok" },
+  paused: { label: "Pausada", tono: "warn" },
+  under_review: { label: "En revisión", tono: "warn" },
+  closed: { label: "Cerrada", tono: "neutral" },
+  inactive: { label: "Inactiva", tono: "neutral" },
+  payment_required: { label: "Pago pendiente", tono: "danger" },
+};
+
+const FILTROS: Array<{ key: string; label: string }> = [
   { key: "todas", label: "Todas" },
-  { key: "activa", label: "Activas" },
-  { key: "pausada", label: "Pausadas" },
-  { key: "borrador", label: "Borradores" },
+  { key: "active", label: "Activas" },
+  { key: "under_review", label: "En revisión" },
+  { key: "paused", label: "Pausadas" },
 ];
 
-const badgeTono: Record<EstadoPublicacion, EstadoTono> = {
-  activa: "ok",
-  pausada: "warn",
-  borrador: "neutral",
-};
-
-const estadoLabel: Record<EstadoPublicacion, string> = {
-  activa: "Activa",
-  pausada: "Pausada",
-  borrador: "Borrador",
-};
-
 export function Publicaciones() {
-  const [filtro, setFiltro] = useState<(typeof FILTROS)[number]["key"]>("todas");
+  const [filtro, setFiltro] = useState("todas");
+  const [busqueda, setBusqueda] = useState("");
+  const qs = useMemo(() => {
+    const p = new URLSearchParams();
+    if (filtro !== "todas") p.set("estado", filtro);
+    if (busqueda.trim()) p.set("q", busqueda.trim());
+    return p.toString();
+  }, [filtro, busqueda]);
 
-  const conteo = useMemo(() => {
-    const c = { activa: 0, pausada: 0, borrador: 0 };
-    for (const p of publicaciones) c[p.estado]++;
-    return c;
-  }, []);
-
-  const lista = publicaciones.filter(
-    (p) => filtro === "todas" || p.estado === filtro,
+  const { data, error, loading } = useApi<Resp>(
+    `/publicaciones${qs ? `?${qs}` : ""}`,
   );
 
   return (
     <div>
       <PageHeader
         titulo="Publicaciones"
-        subtitulo={`${conteo.activa} activas · ${conteo.pausada} pausadas · ${conteo.borrador} borradores`}
+        subtitulo={
+          data
+            ? `${data.conteo.todas ?? 0} en total · ${data.conteo.active ?? 0} activas`
+            : "Sincronizadas desde Mercado Libre"
+        }
         acciones={
           <>
             <GhostButton>Editar precios en lote</GhostButton>
@@ -56,7 +76,7 @@ export function Publicaciones() {
         }
       />
 
-      <div className="mb-5 flex flex-wrap gap-1.5">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         {FILTROS.map((f) => (
           <button
             key={f.key}
@@ -69,97 +89,77 @@ export function Publicaciones() {
             )}
           >
             {f.label}
+            {data && f.key !== "todas" && data.conteo[f.key] != null && (
+              <span className="ml-1.5 text-ink/35">{data.conteo[f.key]}</span>
+            )}
           </button>
         ))}
+        <input
+          value={busqueda}
+          onChange={(e) => setBusqueda(e.target.value)}
+          placeholder="Buscar…"
+          className="ml-auto w-44 rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
+        />
       </div>
 
-      <Card padding={false} className="mb-8 overflow-hidden">
-        {lista.map((p) => (
-          <div
-            key={p.id}
-            className="flex items-center gap-4 border-b hairline px-4 py-3.5 last:border-b-0"
-          >
-            <div className="h-11 w-11 shrink-0 rounded-lg bg-[repeating-linear-gradient(45deg,rgba(16,24,32,0.07)_0_6px,rgba(16,24,32,0.02)_6px_12px)]" />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[14px] font-semibold">
-                {p.titulo}
-              </div>
-              <div className="mt-0.5 text-[12.5px] text-ink/50">
-                Stock ML: {p.stockMl}
-              </div>
-            </div>
-            <div className="w-20 shrink-0 text-right text-[14px] font-bold sm:text-left">
-              {formatARS(p.precio)}
-            </div>
-            <div className="hidden sm:block">
-              <Badge tono={badgeTono[p.estado]}>{estadoLabel[p.estado]}</Badge>
-            </div>
-            <button className="shrink-0 text-[13px] font-semibold text-accent hover:text-accent-hover">
-              Editar
-            </button>
-          </div>
-        ))}
-        {lista.length === 0 && (
-          <div className="px-4 py-8 text-center text-[13.5px] text-ink/45">
-            No hay publicaciones con este filtro.
-          </div>
-        )}
-      </Card>
+      {loading && <EmptyHint>Cargando publicaciones…</EmptyHint>}
+      {error && <EmptyHint>No se pudieron cargar: {error}</EmptyHint>}
 
-      <h2 className="mb-3.5 text-[15px] font-semibold">
-        Crear publicación con IA
-      </h2>
-      <Card className="grid gap-6 md:grid-cols-2">
-        <div className="flex flex-col gap-3.5">
-          <Field label="Título (generado por IA)">
-            Holder acrílico Jimin — ver. 2 edición coleccionista
-          </Field>
-          <Field label="Descripción" multiline>
-            Holder impreso en 3D para tus photocards favoritas, con acabado mate y
-            detalle en violeta…
-          </Field>
-          <button className="text-left text-[13px] font-semibold text-accent hover:text-accent-hover">
-            ↻ Regenerar con IA
-          </button>
-        </div>
-        <div>
-          <div className="mb-1.5 text-[12.5px] text-ink/50">Imágenes</div>
-          <div className="grid grid-cols-3 gap-2">
-            {["foto 1", "foto 2", "generada IA"].map((t) => (
+      {data && (
+        <Card padding={false} className="overflow-hidden">
+          {data.publicaciones.map((p) => {
+            const meta = ESTADO_META[p.estado] ?? {
+              label: p.estado,
+              tono: "neutral" as EstadoTono,
+            };
+            return (
               <div
-                key={t}
-                className="flex aspect-square items-center justify-center rounded-lg bg-[repeating-linear-gradient(45deg,rgba(16,24,32,0.07)_0_6px,rgba(16,24,32,0.02)_6px_12px)] p-1.5 text-center font-mono text-[9px] text-ink/40"
+                key={p.id}
+                className="flex items-center gap-4 border-b hairline px-4 py-3 last:border-b-0"
               >
-                {t}
+                <div className="h-11 w-11 shrink-0 overflow-hidden rounded-lg bg-ink/[0.04]">
+                  {p.thumbnail && (
+                    <img
+                      src={p.thumbnail}
+                      alt=""
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[14px] font-semibold">
+                    {p.titulo}
+                  </div>
+                  <div className="mt-0.5 text-[12.5px] text-ink/50">
+                    Stock ML: {p.stock_ml}
+                    {p.variantes > 0 && ` · ${p.variantes} variantes`}
+                  </div>
+                </div>
+                <div className="hidden w-24 shrink-0 text-right text-[14px] font-bold sm:block">
+                  {p.precio != null ? formatARS(p.precio) : "—"}
+                </div>
+                <div className="hidden sm:block">
+                  <Badge tono={meta.tono}>{meta.label}</Badge>
+                </div>
+                <a
+                  href={p.permalink ?? "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 text-[13px] font-semibold text-accent hover:text-accent-hover"
+                >
+                  Ver
+                </a>
               </div>
-            ))}
-          </div>
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  children,
-  multiline,
-}: {
-  label: string;
-  children: ReactNode;
-  multiline?: boolean;
-}) {
-  return (
-    <div>
-      <div className="mb-1.5 text-[12.5px] text-ink/50">{label}</div>
-      <div
-        className={cx(
-          "rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px]",
-          multiline ? "min-h-16 text-ink/60" : "",
-        )}
-      >
-        {children}
-      </div>
+            );
+          })}
+          {data.publicaciones.length === 0 && (
+            <div className="px-4 py-8 text-center text-[13.5px] text-ink/45">
+              No hay publicaciones con este filtro.
+            </div>
+          )}
+        </Card>
+      )}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { catalogo } from "./catalogo";
 import { ml } from "./ml";
+import { panel } from "./panel";
 
 export const api = new Hono<{ Bindings: Env }>();
 
@@ -21,5 +22,6 @@ api.get("/status", (c) => {
 
 api.route("/catalogo", catalogo);
 api.route("/ml", ml);
+api.route("/", panel);
 
 api.all("*", (c) => c.json({ error: "not_found" }, 404));

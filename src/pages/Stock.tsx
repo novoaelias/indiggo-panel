@@ -25,6 +25,11 @@ export function Stock() {
         subtitulo={`${bajoMinimo} ${bajoMinimo === 1 ? "producto" : "productos"} por debajo del mínimo`}
       />
 
+      <div className="mb-6 rounded-[12px] bg-warn-bg px-4 py-3 text-[13px] text-warn">
+        Datos de ejemplo. Este módulo se conecta cuando derivemos el catálogo de
+        productos desde las publicaciones y cargues el stock físico.
+      </div>
+
       <div className="grid gap-5 lg:grid-cols-[1.5fr_1fr]">
         <Card padding={false} className="overflow-hidden">
           <div className="grid grid-cols-[2fr_1fr_1fr_1fr] border-b hairline px-4 py-3 text-[11.5px] font-semibold uppercase tracking-[0.03em] text-ink/45">

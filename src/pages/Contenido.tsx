@@ -10,6 +10,11 @@ export function Contenido() {
         acciones={<PrimaryButton>+ Generar contenido</PrimaryButton>}
       />
 
+      <div className="mb-6 rounded-[12px] bg-warn-bg px-4 py-3 text-[13px] text-warn">
+        Datos de ejemplo. La generación con IA (kie.ai + Claude) se conecta más
+        adelante.
+      </div>
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {contenidoRedes.map((c) => (
           <Card key={c.id} padding={false} className="overflow-hidden">

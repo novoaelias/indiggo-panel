@@ -186,7 +186,10 @@ export function Stock() {
                           className="flex cursor-pointer items-center gap-2.5 border-b hairline py-2 last:border-b-0"
                         >
                           <input type="checkbox" className="h-4 w-4 shrink-0" />
-                          <span className="min-w-0 flex-1 truncate text-[13px]">
+                          <span
+                            className="min-w-0 flex-1 text-[13px] leading-snug [overflow-wrap:anywhere]"
+                            title={q.nombre}
+                          >
                             {q.nombre}
                             {q.tipo === "insumo" && q.ya_tengo != null && (
                               <span className="ml-1 text-[10.5px] text-ink/35">
@@ -252,7 +255,10 @@ function InsumosTab({ onSaved }: { onSaved: () => void }) {
             className="grid grid-cols-[2fr_0.7fr_0.7fr] items-center gap-2 border-b hairline px-4 py-2.5 last:border-b-0"
           >
             <div className="min-w-0">
-              <div className="truncate text-[13px] font-semibold">
+              <div
+                className="text-[13px] font-semibold leading-snug [overflow-wrap:anywhere]"
+                title={c.nombre}
+              >
                 {c.nombre}
               </div>
               <div className="text-[11px] text-ink/40">
@@ -302,7 +308,12 @@ function StockFila({ item, onSaved }: { item: StockItem; onSaved: () => void }) 
   return (
     <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] items-center gap-2 border-b hairline px-4 py-2.5 last:border-b-0">
       <div className="min-w-0 pr-2">
-        <div className="truncate text-[13px] font-semibold">{item.nombre}</div>
+        <div
+          className="text-[13px] font-semibold leading-snug [overflow-wrap:anywhere]"
+          title={item.nombre}
+        >
+          {item.nombre}
+        </div>
         <div className="text-[11px] text-ink/40">{item.categoria}</div>
       </div>
       <NumeroEditable

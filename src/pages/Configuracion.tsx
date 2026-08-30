@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Card,
@@ -80,6 +80,23 @@ function MercadoLibreSection() {
     await api("/ml/desconectar", { method: "POST" });
     reload();
   }
+
+  // Al volver del OAuth, disparar la primera sincronización en primer plano
+  // (más confiable que el background del callback para cuentas grandes).
+  const autoSyncHecho = useRef(false);
+  useEffect(() => {
+    if (
+      aviso === "conectado" &&
+      data?.conectado &&
+      !data.ultimo_sync &&
+      !autoSyncHecho.current &&
+      !sincronizando
+    ) {
+      autoSyncHecho.current = true;
+      void sincronizar();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aviso, data]);
 
   const cerrarAviso = () => {
     params.delete("ml");

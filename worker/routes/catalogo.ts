@@ -111,6 +111,17 @@ catalogo.delete("/integrantes/:id", async (c) => {
 });
 
 // --- Categorías ---
+catalogo.get("/productos", async (c) => {
+  const db = supa(c.env);
+  const { data, error } = await db
+    .from("products")
+    .select("id, nombre")
+    .eq("activo", true)
+    .order("nombre");
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ productos: data });
+});
+
 catalogo.get("/categorias", async (c) => {
   const db = supa(c.env);
   const { data, error } = await db

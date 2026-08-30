@@ -1,1 +1,0 @@
-{"root":["./worker/cron.ts","./worker/env.ts","./worker/index.ts","./worker/lib/ml.ts","./worker/lib/supabase.ts","./worker/lib/sync.ts","./worker/routes/api.ts","./worker/routes/catalogo.ts","./worker/routes/ml.ts","./worker-configuration.d.ts"],"version":"5.9.3"}

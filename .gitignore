@@ -8,5 +8,6 @@ dist
 .DS_Store
 npm-debug.log*
 .vite
+*.tsbuildinfo
 worker-configuration.d.ts
 .claude/settings.local.json

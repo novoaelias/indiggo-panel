@@ -8,7 +8,7 @@ import {
   PrimaryButton,
   cx,
 } from "@/components/ui";
-import { useApi } from "@/lib/api";
+import { api, useApi } from "@/lib/api";
 import { formatARS } from "@/lib/format";
 import type { EstadoTono } from "@/lib/types";
 
@@ -58,9 +58,16 @@ export function Publicaciones() {
   const { data, error, loading } = useApi<Resp>(
     `/publicaciones${qs ? `?${qs}` : ""}`,
   );
+  const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
 
   return (
     <div>
+      {iaPara && (
+        <SugerenciaModal
+          publicacion={iaPara}
+          onClose={() => setIaPara(null)}
+        />
+      )}
       <PageHeader
         titulo="Publicaciones"
         subtitulo={
@@ -142,11 +149,17 @@ export function Publicaciones() {
                 <div className="hidden sm:block">
                   <Badge tono={meta.tono}>{meta.label}</Badge>
                 </div>
+                <button
+                  onClick={() => setIaPara(p)}
+                  className="shrink-0 text-[13px] font-semibold text-accent hover:text-accent-hover"
+                >
+                  IA
+                </button>
                 <a
                   href={p.permalink ?? "#"}
                   target="_blank"
                   rel="noreferrer"
-                  className="shrink-0 text-[13px] font-semibold text-accent hover:text-accent-hover"
+                  className="hidden shrink-0 text-[13px] font-semibold text-ink/45 hover:text-ink sm:block"
                 >
                   Ver
                 </a>
@@ -160,6 +173,163 @@ export function Publicaciones() {
           )}
         </Card>
       )}
+    </div>
+  );
+}
+
+interface Sugerencia {
+  titulo: string;
+  descripcion: string;
+  palabras_clave: string[];
+  notas: string;
+}
+
+function SugerenciaModal({
+  publicacion,
+  onClose,
+}: {
+  publicacion: PublicacionApi;
+  onClose: () => void;
+}) {
+  const [objetivo, setObjetivo] = useState("");
+  const [cargando, setCargando] = useState(false);
+  const [sug, setSug] = useState<Sugerencia>();
+  const [err, setErr] = useState<string>();
+  const [copiado, setCopiado] = useState<string>();
+
+  async function generar() {
+    setCargando(true);
+    setErr(undefined);
+    try {
+      const r = await api<{ sugerencia: Sugerencia }>(
+        `/ia/publicacion/${publicacion.id}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ objetivo: objetivo.trim() || undefined }),
+        },
+      );
+      setSug(r.sugerencia);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  function copiar(texto: string, que: string) {
+    navigator.clipboard?.writeText(texto);
+    setCopiado(que);
+    setTimeout(() => setCopiado(undefined), 1500);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+      <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <h2 className="text-[16px] font-semibold">Reescribir con IA</h2>
+          <button
+            onClick={onClose}
+            className="text-[18px] font-bold text-ink/40 hover:text-ink"
+          >
+            ×
+          </button>
+        </div>
+        <p className="mb-4 text-[12.5px] text-ink/50">{publicacion.titulo}</p>
+
+        <label className="mb-3 flex flex-col gap-1.5">
+          <span className="text-[12.5px] text-ink/50">
+            Qué querés lograr (opcional)
+          </span>
+          <input
+            value={objetivo}
+            onChange={(e) => setObjetivo(e.target.value)}
+            placeholder="ej: resaltar que es impreso en 3D, apuntar a regalo"
+            className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
+          />
+        </label>
+
+        <PrimaryButton onClick={generar}>
+          {cargando ? "Generando…" : sug ? "Regenerar" : "Generar sugerencia"}
+        </PrimaryButton>
+
+        {err && <div className="mt-3 text-[12.5px] text-danger">{err}</div>}
+
+        {sug && (
+          <div className="mt-5 flex flex-col gap-4">
+            <Campo
+              titulo={`Título (${sug.titulo.length}/60)`}
+              onCopiar={() => copiar(sug.titulo, "titulo")}
+              copiado={copiado === "titulo"}
+            >
+              {sug.titulo}
+            </Campo>
+            <Campo
+              titulo="Descripción"
+              onCopiar={() => copiar(sug.descripcion, "desc")}
+              copiado={copiado === "desc"}
+            >
+              <pre className="whitespace-pre-wrap font-sans">
+                {sug.descripcion}
+              </pre>
+            </Campo>
+            {sug.palabras_clave?.length > 0 && (
+              <div>
+                <div className="mb-1.5 text-[12.5px] text-ink/50">
+                  Palabras clave
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {sug.palabras_clave.map((k) => (
+                    <span
+                      key={k}
+                      className="rounded-full bg-ink/[0.05] px-2.5 py-1 text-[12px] text-ink/70"
+                    >
+                      {k}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {sug.notas && (
+              <div className="rounded-lg bg-accent-soft px-3 py-2 text-[12.5px] text-accent">
+                {sug.notas}
+              </div>
+            )}
+            <p className="text-[11.5px] text-ink/40">
+              Revisá y copiá lo que sirva. Todavía no se aplica solo a Mercado
+              Libre.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Campo({
+  titulo,
+  children,
+  onCopiar,
+  copiado,
+}: {
+  titulo: string;
+  children: React.ReactNode;
+  onCopiar: () => void;
+  copiado: boolean;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[12.5px] text-ink/50">{titulo}</span>
+        <button
+          onClick={onCopiar}
+          className="text-[12px] font-semibold text-accent hover:text-accent-hover"
+        >
+          {copiado ? "copiado ✓" : "copiar"}
+        </button>
+      </div>
+      <div className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px]">
+        {children}
+      </div>
     </div>
   );
 }

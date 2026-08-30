@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { catalogo } from "./catalogo";
+import { ia } from "./ia";
 import { ml } from "./ml";
 import { panel } from "./panel";
 
@@ -22,6 +23,7 @@ api.get("/status", (c) => {
 
 api.route("/catalogo", catalogo);
 api.route("/ml", ml);
+api.route("/ia", ia);
 api.route("/", panel);
 
 api.all("*", (c) => c.json({ error: "not_found" }, 404));

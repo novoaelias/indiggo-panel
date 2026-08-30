@@ -80,6 +80,59 @@ interface MlItem {
   }>;
 }
 
+async function upsertItem(db: DB, it: MlItem): Promise<void> {
+  const { data: listing, error } = await db
+    .from("ml_listings")
+    .upsert(
+      {
+        ml_item_id: it.id,
+        titulo: it.title,
+        estado: it.status,
+        precio: it.price,
+        moneda: it.currency_id ?? "ARS",
+        cantidad_ml: it.available_quantity,
+        permalink: it.permalink,
+        thumbnail: (it.secure_thumbnail ?? it.thumbnail)?.replace(
+          /^http:/,
+          "https:",
+        ),
+        tiene_variantes: (it.variations?.length ?? 0) > 0,
+        ml_actualizado_at: it.last_updated,
+        sincronizado_at: new Date().toISOString(),
+        raw: it as unknown as Database["public"]["Tables"]["ml_listings"]["Insert"]["raw"],
+      },
+      { onConflict: "ml_item_id" },
+    )
+    .select("id")
+    .single();
+  if (error || !listing) throw new Error(`listing ${it.id}: ${error?.message}`);
+
+  for (const v of it.variations ?? []) {
+    await db.from("ml_listing_variations").upsert(
+      {
+        ml_listing_id: listing.id,
+        ml_variation_id: String(v.id),
+        combinacion:
+          v.attribute_combinations as Database["public"]["Tables"]["ml_listing_variations"]["Insert"]["combinacion"],
+        cantidad_ml: v.available_quantity,
+        precio: v.price,
+      },
+      { onConflict: "ml_listing_id,ml_variation_id" },
+    );
+  }
+}
+
+/** Sincroniza una sola publicación (usado por el webhook de notificaciones). */
+export async function syncOneItem(
+  env: Env,
+  db: DB,
+  itemId: string,
+): Promise<void> {
+  const res = await mlFetch(env, db, `/items/${itemId}?include_attributes=all`);
+  if (!res.ok) throw new Error(`GET /items/${itemId} → ${res.status}`);
+  await upsertItem(db, (await res.json()) as MlItem);
+}
+
 async function scanItemIds(
   env: Env,
   db: DB,
@@ -111,7 +164,6 @@ async function syncPublicaciones(
   const ids = await scanItemIds(env, db, userId);
   let publicaciones = 0;
   let variantes = 0;
-  const ahora = new Date().toISOString();
 
   for (let i = 0; i < ids.length; i += 20) {
     const lote = ids.slice(i, i + 20);
@@ -126,51 +178,12 @@ async function syncPublicaciones(
 
     for (const entry of multi) {
       if (entry.code !== 200 || !entry.body?.id) continue;
-      const it = entry.body;
-      const { data: listing, error } = await db
-        .from("ml_listings")
-        .upsert(
-          {
-            ml_item_id: it.id,
-            titulo: it.title,
-            estado: it.status,
-            precio: it.price,
-            moneda: it.currency_id ?? "ARS",
-            cantidad_ml: it.available_quantity,
-            permalink: it.permalink,
-            thumbnail: (it.secure_thumbnail ?? it.thumbnail)?.replace(
-              /^http:/,
-              "https:",
-            ),
-            tiene_variantes: (it.variations?.length ?? 0) > 0,
-            ml_actualizado_at: it.last_updated,
-            sincronizado_at: ahora,
-            raw: entry.body as unknown as Database["public"]["Tables"]["ml_listings"]["Insert"]["raw"],
-          },
-          { onConflict: "ml_item_id" },
-        )
-        .select("id")
-        .single();
-      if (error || !listing) {
-        errores.push(`listing ${it.id}: ${error?.message}`);
-        continue;
-      }
-      publicaciones++;
-
-      for (const v of it.variations ?? []) {
-        const { error: ev } = await db.from("ml_listing_variations").upsert(
-          {
-            ml_listing_id: listing.id,
-            ml_variation_id: String(v.id),
-            combinacion:
-              v.attribute_combinations as Database["public"]["Tables"]["ml_listing_variations"]["Insert"]["combinacion"],
-            cantidad_ml: v.available_quantity,
-            precio: v.price,
-          },
-          { onConflict: "ml_listing_id,ml_variation_id" },
-        );
-        if (ev) errores.push(`variación ${it.id}/${v.id}: ${ev.message}`);
-        else variantes++;
+      try {
+        await upsertItem(db, entry.body);
+        publicaciones++;
+        variantes += entry.body.variations?.length ?? 0;
+      } catch (e) {
+        errores.push((e as Error).message);
       }
     }
   }
@@ -190,6 +203,49 @@ interface MlOrder {
     quantity?: number;
     unit_price?: number;
   }>;
+}
+
+async function upsertOrder(db: DB, o: MlOrder): Promise<void> {
+  const { data: order, error } = await db
+    .from("ml_orders")
+    .upsert(
+      {
+        ml_order_id: String(o.id),
+        estado: o.status,
+        estado_envio: o.shipping?.status ?? null,
+        fecha: o.date_created,
+        total: o.total_amount,
+        comprador: o.buyer?.nickname ?? null,
+        raw: o as unknown as Database["public"]["Tables"]["ml_orders"]["Insert"]["raw"],
+      },
+      { onConflict: "ml_order_id" },
+    )
+    .select("id")
+    .single();
+  if (error || !order) throw new Error(`order ${o.id}: ${error?.message}`);
+
+  await db.from("ml_order_items").delete().eq("ml_order_id", order.id);
+  const items = (o.order_items ?? []).map((li) => ({
+    ml_order_id: order.id,
+    ml_item_id: li.item?.id ?? null,
+    ml_variation_id:
+      li.item?.variation_id != null ? String(li.item.variation_id) : null,
+    titulo: li.item?.title ?? null,
+    cantidad: li.quantity ?? 1,
+    precio_unitario: li.unit_price ?? null,
+  }));
+  if (items.length) await db.from("ml_order_items").insert(items);
+}
+
+/** Sincroniza un solo pedido (usado por el webhook de notificaciones). */
+export async function syncOneOrder(
+  env: Env,
+  db: DB,
+  orderId: string,
+): Promise<void> {
+  const res = await mlFetch(env, db, `/orders/${orderId}`);
+  if (!res.ok) throw new Error(`GET /orders/${orderId} → ${res.status}`);
+  await upsertOrder(db, (await res.json()) as MlOrder);
 }
 
 async function syncPedidos(
@@ -221,41 +277,11 @@ async function syncPedidos(
     if (!page || !page.results?.length) break;
 
     for (const o of page.results) {
-      const { data: order, error } = await db
-        .from("ml_orders")
-        .upsert(
-          {
-            ml_order_id: String(o.id),
-            estado: o.status,
-            estado_envio: o.shipping?.status ?? null,
-            fecha: o.date_created,
-            total: o.total_amount,
-            comprador: o.buyer?.nickname ?? null,
-            raw: o as unknown as Database["public"]["Tables"]["ml_orders"]["Insert"]["raw"],
-          },
-          { onConflict: "ml_order_id" },
-        )
-        .select("id")
-        .single();
-      if (error || !order) {
-        errores.push(`order ${o.id}: ${error?.message}`);
-        continue;
-      }
-      total++;
-
-      await db.from("ml_order_items").delete().eq("ml_order_id", order.id);
-      const items = (o.order_items ?? []).map((li) => ({
-        ml_order_id: order.id,
-        ml_item_id: li.item?.id ?? null,
-        ml_variation_id:
-          li.item?.variation_id != null ? String(li.item.variation_id) : null,
-        titulo: li.item?.title ?? null,
-        cantidad: li.quantity ?? 1,
-        precio_unitario: li.unit_price ?? null,
-      }));
-      if (items.length) {
-        const { error: ei } = await db.from("ml_order_items").insert(items);
-        if (ei) errores.push(`order items ${o.id}: ${ei.message}`);
+      try {
+        await upsertOrder(db, o);
+        total++;
+      } catch (e) {
+        errores.push((e as Error).message);
       }
     }
     if (offset + 50 >= (page.paging?.total ?? 0)) break;

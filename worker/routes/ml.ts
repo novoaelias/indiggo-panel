@@ -10,7 +10,7 @@ import {
   randomVerifier,
   redirectUri,
 } from "../lib/ml";
-import { syncAll } from "../lib/sync";
+import { syncAll, syncOneItem, syncOneOrder } from "../lib/sync";
 
 export const ml = new Hono<{ Bindings: Env }>();
 
@@ -120,6 +120,60 @@ ml.post("/sync", async (c) => {
   }
   const res = await syncAll(c.env, db);
   return c.json(res);
+});
+
+// Webhook de notificaciones de ML. Debe responder 200 en < 500 ms:
+// se hace ACK inmediato y el trabajo va en waitUntil.
+interface MlNotif {
+  topic?: string;
+  resource?: string;
+  user_id?: number;
+}
+
+async function procesarNotif(
+  env: Env,
+  db: ReturnType<typeof supa>,
+  n: MlNotif,
+): Promise<void> {
+  if (!n.resource) return;
+  const token = await getToken(db);
+  if (token?.meta.user_id && n.user_id && token.meta.user_id !== n.user_id) {
+    console.warn("[ml] notif de otro user_id, ignorada", n.user_id);
+    return;
+  }
+
+  const id = n.resource.split("/").filter(Boolean).pop();
+  if (!id) return;
+
+  switch (n.topic) {
+    case "items":
+    case "marketplace_items":
+      await syncOneItem(env, db, id);
+      break;
+    case "orders":
+    case "orders_v2":
+    case "marketplace_orders":
+      await syncOneOrder(env, db, id);
+      break;
+    default:
+      console.log(`[ml] notif topic sin manejar: ${n.topic}`);
+  }
+}
+
+ml.post("/notifications", async (c) => {
+  let body: MlNotif = {};
+  try {
+    body = await c.req.json<MlNotif>();
+  } catch {
+    return c.body(null, 200);
+  }
+  const db = supa(c.env);
+  c.executionCtx.waitUntil(
+    procesarNotif(c.env, db, body).catch((e) =>
+      console.error("[ml] notif error", e),
+    ),
+  );
+  return c.body(null, 200);
 });
 
 // Desconectar (borra el token; los datos ya sincronizados quedan).

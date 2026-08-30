@@ -221,7 +221,7 @@ function GenerarModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
       <form
         onSubmit={generar}
         className="w-full max-w-md rounded-[14px] border bg-surface p-6 hairline"

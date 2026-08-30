@@ -61,9 +61,9 @@ export async function generarImagen(
     throw new Error(`kie createTask: ${cj.msg ?? crear.status}`);
   }
 
-  // polling (hasta ~90 s)
-  for (let i = 0; i < 45; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+  // polling (hasta ~75 s)
+  for (let i = 0; i < 25; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
     const rec = await fetch(
       `${BASE}/recordInfo?taskId=${encodeURIComponent(taskId)}`,
       { headers },

@@ -287,7 +287,7 @@ function SugerenciaModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
       <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
         <div className="mb-1 flex items-start justify-between gap-3">
           <h2 className="text-[16px] font-semibold">Reescribir con IA</h2>
@@ -518,7 +518,7 @@ function NuevaPublicacionModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
       <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
         <div className="mb-4 flex items-start justify-between">
           <h2 className="text-[16px] font-semibold">Crear publicación con IA</h2>
@@ -731,7 +731,7 @@ function PreciosModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/30 p-4 sm:p-8">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
       <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
         <div className="mb-4 flex items-start justify-between">
           <h2 className="text-[16px] font-semibold">Editar precios</h2>

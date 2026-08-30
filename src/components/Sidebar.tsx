@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { NavLink } from "react-router-dom";
 import { NAV } from "./nav";
 import { Logo } from "./Logo";
 import { cx } from "./ui";
+import { alternarTema, temaActual } from "@/lib/theme";
 
 function NavItems({ onNavigate }: { onNavigate?: () => void }) {
   return (
@@ -32,10 +34,20 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function Footer() {
+  const [tema, setTema] = useState(temaActual());
   return (
-    <div className="mt-auto flex flex-col gap-0.5 border-t hairline px-2.5 pt-3">
-      <div className="text-[12.5px] font-semibold">Indiggo Store</div>
-      <div className="text-[11.5px] text-ink/45">Panel privado</div>
+    <div className="mt-auto flex items-end justify-between border-t hairline px-2.5 pt-3">
+      <div className="flex flex-col gap-0.5">
+        <div className="text-[12.5px] font-semibold">Indiggo Store</div>
+        <div className="text-[11.5px] text-ink/45">Panel privado</div>
+      </div>
+      <button
+        onClick={() => setTema(alternarTema())}
+        title="Cambiar tema"
+        className="rounded-md p-1.5 text-[13px] text-ink/45 hover:bg-ink/[0.05] hover:text-ink"
+      >
+        {tema === "dark" ? "☀" : "☾"}
+      </button>
     </div>
   );
 }
@@ -70,7 +82,7 @@ export function MobileDrawer({
       <div
         onClick={onClose}
         className={cx(
-          "absolute inset-0 bg-ink/30 transition-opacity",
+          "absolute inset-0 scrim transition-opacity",
           open ? "opacity-100" : "opacity-0",
         )}
       />

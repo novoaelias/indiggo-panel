@@ -1,21 +1,34 @@
 import type { Env } from "./env";
+import { supa } from "./lib/supabase";
+import { getToken, validToken } from "./lib/ml";
+import { syncAll } from "./lib/sync";
 
 /**
- * Puntos de entrada de los cron triggers (ver `triggers.crons` en wrangler.jsonc).
- *  - "0 * / 4 * * *"  → refrescar el access_token de MercadoLibre (expira ~6h).
- *  - "15 * * * *"     → chequear stock real vs. ventas y recalcular alertas.
- *
- * Todavía sin implementar: sólo deja traza para verificar que el schedule corre.
+ * Cron triggers (ver `triggers.crons` en wrangler.jsonc):
+ *  - "0 * / 4 * * *"  → mantener vivo el access_token de MercadoLibre.
+ *  - "15 * * * *"     → sincronizar cuenta ML (publicaciones, pedidos) cada hora.
  */
-export async function runCron(cron: string, _env: Env): Promise<void> {
-  switch (cron) {
-    case "0 */4 * * *":
-      console.log("[cron] refresh ML token — pendiente de implementar");
-      break;
-    case "15 * * * *":
-      console.log("[cron] chequeo de stock/producción — pendiente de implementar");
-      break;
-    default:
-      console.log(`[cron] trigger desconocido: ${cron}`);
+export async function runCron(cron: string, env: Env): Promise<void> {
+  const db = supa(env);
+  const conectado = Boolean(await getToken(db));
+  if (!conectado) {
+    console.log("[cron] ML no conectado, nada que hacer");
+    return;
   }
+
+  if (cron === "0 */4 * * *") {
+    await validToken(env, db); // refresca si está por vencer
+    console.log("[cron] token ML verificado");
+    return;
+  }
+
+  if (cron === "15 * * * *") {
+    const res = await syncAll(env, db);
+    console.log(
+      `[cron] sync ML: ${res.publicaciones} publicaciones, ${res.pedidos} pedidos, ${res.errores.length} errores`,
+    );
+    return;
+  }
+
+  console.log(`[cron] trigger desconocido: ${cron}`);
 }

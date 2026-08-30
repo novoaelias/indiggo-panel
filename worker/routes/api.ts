@@ -1,12 +1,11 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import { catalogo } from "./catalogo";
+import { ml } from "./ml";
 
 export const api = new Hono<{ Bindings: Env }>();
 
-api.get("/health", (c) =>
-  c.json({ ok: true, env: c.env.ENVIRONMENT, ts: new Date().toISOString() }),
-);
+api.get("/health", (c) => c.json({ ok: true, ts: new Date().toISOString() }));
 
 // Estado de las integraciones — el panel lo usa en Configuración.
 // Sólo reporta si el secreto está presente (no lo expone).
@@ -21,5 +20,6 @@ api.get("/status", (c) => {
 });
 
 api.route("/catalogo", catalogo);
+api.route("/ml", ml);
 
 api.all("*", (c) => c.json({ error: "not_found" }, 404));

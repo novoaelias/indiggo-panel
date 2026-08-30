@@ -288,6 +288,7 @@ export type Database = {
       };
       ml_listings: {
         Row: {
+          cantidad_ml: number | null;
           created_at: string;
           estado: string;
           id: string;
@@ -305,6 +306,7 @@ export type Database = {
           updated_at: string;
         };
         Insert: {
+          cantidad_ml?: number | null;
           created_at?: string;
           estado?: string;
           id?: string;
@@ -322,6 +324,7 @@ export type Database = {
           updated_at?: string;
         };
         Update: {
+          cantidad_ml?: number | null;
           created_at?: string;
           estado?: string;
           id?: string;

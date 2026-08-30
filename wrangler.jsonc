@@ -16,10 +16,7 @@
   },
   "triggers": {
     // ML refresca el access_token cada ~6h (expira en 6h). Corre cada 4h.
-    // Chequeo de stock/producción una vez por hora.
+    // Sync de la cuenta ML una vez por hora.
     "crons": ["0 */4 * * *", "15 * * * *"]
-  },
-  "vars": {
-    "ENVIRONMENT": "production"
   }
 }

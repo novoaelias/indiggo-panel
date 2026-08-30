@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Card,
   EmptyHint,
@@ -28,9 +29,158 @@ export function Configuracion() {
         subtitulo="Catálogo base, grupos de kpop e integrantes, conexiones"
       />
       <div className="flex flex-col gap-8">
+        <MercadoLibreSection />
         <GruposSection />
         <ConexionesSection />
       </div>
+    </div>
+  );
+}
+
+interface MlEstado {
+  conectado: boolean;
+  vendedor?: string | null;
+  ultimo_sync?: string | null;
+  token_vence?: string | null;
+  publicaciones?: number;
+  variantes?: number;
+  pedidos?: number;
+}
+
+function MercadoLibreSection() {
+  const { data, loading, reload } = useApi<MlEstado>("/ml/estado");
+  const [params, setParams] = useSearchParams();
+  const aviso = params.get("ml");
+  const [sincronizando, setSincronizando] = useState(false);
+  const [resultado, setResultado] = useState<string>();
+
+  async function sincronizar() {
+    setSincronizando(true);
+    setResultado(undefined);
+    try {
+      const r = await api<{
+        publicaciones: number;
+        pedidos: number;
+        variantes: number;
+        errores: string[];
+      }>("/ml/sync", { method: "POST" });
+      setResultado(
+        `${r.publicaciones} publicaciones, ${r.variantes} variantes, ${r.pedidos} pedidos` +
+          (r.errores.length ? ` · ${r.errores.length} errores` : ""),
+      );
+      reload();
+    } catch (e) {
+      setResultado((e as Error).message);
+    } finally {
+      setSincronizando(false);
+    }
+  }
+
+  async function desconectar() {
+    await api("/ml/desconectar", { method: "POST" });
+    reload();
+  }
+
+  const cerrarAviso = () => {
+    params.delete("ml");
+    params.delete("motivo");
+    setParams(params, { replace: true });
+  };
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Mercado Libre</h2>
+
+      {aviso === "conectado" && (
+        <Banner tono="ok" onClose={cerrarAviso}>
+          Cuenta conectada. Estamos trayendo tus publicaciones y pedidos…
+        </Banner>
+      )}
+      {aviso === "error" && (
+        <Banner tono="danger" onClose={cerrarAviso}>
+          No se pudo conectar: {params.get("motivo") ?? "error desconocido"}
+        </Banner>
+      )}
+
+      <Card>
+        {loading && <div className="text-[13.5px] text-ink/50">Cargando…</div>}
+
+        {!loading && !data?.conectado && (
+          <div className="flex flex-col gap-3">
+            <p className="max-w-prose text-[13.5px] text-ink/55">
+              Conectá tu cuenta para que el panel acceda a tus publicaciones,
+              variantes, precios y pedidos. Se abre el login de Mercado Libre.
+            </p>
+            <div>
+              <a
+                href="/api/ml/connect"
+                className="inline-block rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover"
+              >
+                Conectar Mercado Libre
+              </a>
+            </div>
+          </div>
+        )}
+
+        {!loading && data?.conectado && (
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Mini label="Vendedor" value={data.vendedor ?? "—"} />
+              <Mini label="Publicaciones" value={String(data.publicaciones ?? 0)} />
+              <Mini label="Variantes" value={String(data.variantes ?? 0)} />
+              <Mini label="Pedidos" value={String(data.pedidos ?? 0)} />
+            </div>
+            <div className="text-[12.5px] text-ink/50">
+              Última sincronización:{" "}
+              {data.ultimo_sync
+                ? new Date(data.ultimo_sync).toLocaleString("es-AR")
+                : "nunca"}
+            </div>
+            {resultado && (
+              <div className="text-[12.5px] text-ink/60">{resultado}</div>
+            )}
+            <div className="flex gap-2.5">
+              <PrimaryButton onClick={sincronizar}>
+                {sincronizando ? "Sincronizando…" : "Re-sincronizar ahora"}
+              </PrimaryButton>
+              <GhostButton onClick={desconectar}>Desconectar</GhostButton>
+            </div>
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
+function Mini({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[12px] text-ink/50">{label}</div>
+      <div className="font-display text-[18px] font-bold">{value}</div>
+    </div>
+  );
+}
+
+function Banner({
+  tono,
+  children,
+  onClose,
+}: {
+  tono: "ok" | "danger";
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className={
+        "mb-4 flex items-start justify-between gap-3 rounded-[12px] px-4 py-3 text-[13px] " +
+        (tono === "ok" ? "bg-ok-bg text-ok" : "bg-danger-bg text-danger")
+      }
+    >
+      <span>{children}</span>
+      <button onClick={onClose} className="shrink-0 font-bold opacity-70">
+        ×
+      </button>
     </div>
   );
 }

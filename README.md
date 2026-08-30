@@ -47,6 +47,23 @@ npm run build     # wrangler types + tsc + vite build  ->  dist/
 npm run deploy    # build + wrangler deploy
 ```
 
+Primera vez (una sola):
+
+```bash
+npm run deploy                       # crea el Worker, imprime la URL .workers.dev
+npx wrangler secret bulk .dev.vars   # sube los secretos al Worker desplegado
+```
+
+## Conectar Mercado Libre
+
+1. En el devcenter de ML, poné como **Redirect URI**:
+   `https://<url-del-worker>/api/ml/callback`
+2. Abrí `https://<url-del-worker>/api/ml/connect` en el browser y autorizá.
+3. Vuelve a `/configuracion?ml=conectado` y arranca solo el primer sync
+   (publicaciones + variantes + pedidos de los últimos 60 días).
+
+El `access_token` (6 h) se refresca solo por cron cada 4 h; el sync corre cada hora.
+
 ## Estructura
 
 ```

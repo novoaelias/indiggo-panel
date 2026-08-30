@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, EmptyHint, PageHeader } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
 
@@ -9,6 +9,8 @@ interface Pieza {
   caption: string | null;
   hashtags: string | null;
   media_url: string | null;
+  estado: string;
+  error: string | null;
   created_at: string;
 }
 interface Producto {
@@ -58,7 +60,11 @@ export function Contenido() {
       {piezas.data && piezas.data.piezas.length > 0 && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {piezas.data.piezas.map((p) => (
-            <PiezaCard key={p.id} pieza={p} onBorrar={() => piezas.reload()} />
+            <PiezaCard
+              key={p.id}
+              pieza={p}
+              onCambio={() => piezas.reload()}
+            />
           ))}
         </div>
       )}
@@ -68,28 +74,67 @@ export function Contenido() {
 
 function PiezaCard({
   pieza,
-  onBorrar,
+  onCambio,
 }: {
   pieza: Pieza;
-  onBorrar: () => void;
+  onCambio: () => void;
 }) {
   const [copiado, setCopiado] = useState(false);
   const textoCompleto = `${pieza.caption ?? ""}\n\n${pieza.hashtags ?? ""}`.trim();
+  const timer = useRef<number | undefined>(undefined);
+
+  // Poll de videos en generación.
+  useEffect(() => {
+    if (pieza.estado !== "generando") return;
+    timer.current = window.setInterval(async () => {
+      try {
+        const r = await api<{ estado: string }>(
+          `/contenido/${pieza.id}/refrescar`,
+          { method: "POST" },
+        );
+        if (r.estado !== "generando") {
+          clearInterval(timer.current);
+          onCambio();
+        }
+      } catch {
+        /* reintenta */
+      }
+    }, 15000);
+    return () => clearInterval(timer.current);
+  }, [pieza.estado, pieza.id, onCambio]);
+
+  const media =
+    pieza.estado === "generando" ? (
+      <div className="flex aspect-[4/5] flex-col items-center justify-center gap-2 bg-ink/[0.04] text-[12px] text-ink/45">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+        generando video…
+      </div>
+    ) : pieza.estado === "error" ? (
+      <div className="flex aspect-[4/5] items-center justify-center bg-danger-bg p-4 text-center text-[12px] text-danger">
+        {pieza.error ?? "falló la generación"}
+      </div>
+    ) : pieza.formato === "video" && pieza.media_url ? (
+      <video
+        src={pieza.media_url}
+        controls
+        className="aspect-[9/16] w-full bg-ink/[0.04] object-cover"
+      />
+    ) : pieza.media_url ? (
+      <img
+        src={pieza.media_url}
+        alt=""
+        className="aspect-[4/5] w-full bg-ink/[0.04] object-cover"
+        loading="lazy"
+      />
+    ) : (
+      <div className="flex aspect-[4/5] items-center justify-center bg-ink/[0.04] text-[12px] text-ink/40">
+        sin media
+      </div>
+    );
 
   return (
     <Card padding={false} className="overflow-hidden">
-      {pieza.media_url ? (
-        <img
-          src={pieza.media_url}
-          alt=""
-          className="aspect-[4/5] w-full bg-ink/[0.04] object-cover"
-          loading="lazy"
-        />
-      ) : (
-        <div className="flex aspect-[4/5] items-center justify-center bg-ink/[0.04] text-[12px] text-ink/40">
-          sin imagen
-        </div>
-      )}
+      {media}
       <div className="p-4">
         <span className="inline-block rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-bold capitalize text-accent">
           {pieza.plataforma}
@@ -109,21 +154,21 @@ function PiezaCard({
           >
             {copiado ? "copiado ✓" : "copiar texto"}
           </button>
-          {pieza.media_url && (
+          {pieza.media_url && pieza.estado === "listo" && (
             <a
               href={pieza.media_url}
               target="_blank"
               rel="noreferrer"
               className="text-[12px] font-semibold text-ink/45 hover:text-ink"
             >
-              abrir imagen
+              abrir {pieza.formato === "video" ? "video" : "imagen"}
             </a>
           )}
           <button
             onClick={async () => {
               if (!window.confirm("¿Borrar esta pieza?")) return;
               await api(`/contenido/${pieza.id}`, { method: "DELETE" });
-              onBorrar();
+              onCambio();
             }}
             className="ml-auto text-[12px] font-semibold text-ink/40 hover:text-danger"
           >
@@ -148,6 +193,7 @@ function GenerarModal({
   const [plataforma, setPlataforma] = useState<"instagram" | "tiktok">(
     "instagram",
   );
+  const [formato, setFormato] = useState<"imagen" | "video">("imagen");
   const [objetivo, setObjetivo] = useState("");
   const [generando, setGenerando] = useState(false);
   const [err, setErr] = useState<string>();
@@ -162,6 +208,7 @@ function GenerarModal({
         body: JSON.stringify({
           producto_id: productoId || undefined,
           plataforma,
+          formato,
           objetivo: objetivo.trim() || undefined,
         }),
       });
@@ -225,6 +272,24 @@ function GenerarModal({
             ))}
           </div>
 
+          <div className="flex gap-2">
+            {(["imagen", "video"] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => setFormato(f)}
+                className={
+                  "flex-1 rounded-lg px-3 py-2 text-[13px] font-semibold capitalize " +
+                  (formato === f
+                    ? "bg-accent-soft text-accent"
+                    : "border border-ink/12 text-ink/55")
+                }
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+
           <label className="flex flex-col gap-1.5">
             <span className="text-[12.5px] text-ink/50">Idea / objetivo (opcional)</span>
             <input
@@ -241,11 +306,17 @@ function GenerarModal({
             disabled={generando}
             className="mt-1 rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
           >
-            {generando ? "Generando… (puede tardar ~30 s)" : "Generar"}
+            {generando
+              ? formato === "video"
+                ? "Encolando…"
+                : "Generando… (~30 s)"
+              : "Generar"}
           </button>
           <p className="text-[11.5px] text-ink/40">
-            Genera la imagen con kie.ai y el texto con Claude. Revisá antes de
-            publicar.
+            {formato === "video"
+              ? "El video (Veo3) tarda 1-3 min; aparece como “generando” y se completa solo."
+              : "Genera la imagen con kie.ai y el texto con Claude."}{" "}
+            Revisá antes de publicar.
           </p>
         </div>
       </form>

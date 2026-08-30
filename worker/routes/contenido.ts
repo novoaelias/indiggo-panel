@@ -2,9 +2,10 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { claude, parseJsonLaxo } from "../lib/claude";
-import { generarImagen } from "../lib/kie";
+import { encolarVideo, estadoVideo, generarImagen } from "../lib/kie";
 
 export const contenido = new Hono<{ Bindings: Env }>();
+type DB = ReturnType<typeof supa>;
 
 const SISTEMA = `Sos el creador de contenido de Indiggo Store (merch de kpop impreso en 3D,
 vende en Mercado Libre Argentina: holders/porta photocards, mostacillas, clickers, llaveros,
@@ -12,19 +13,45 @@ stickers). El contenido es para Instagram y TikTok, apuntado a fans de kpop jóv
 Tono cercano, entusiasta, nada corporativo. Español rioplatense.`;
 
 interface GenIA {
-  prompt_imagen: string;
+  prompt_media: string;
   caption: string;
   hashtags: string;
 }
 
-// Genera una pieza de contenido (imagen + caption + hashtags) para redes.
+async function guardarEnStorage(
+  db: DB,
+  url: string,
+  ext: "png" | "mp4",
+): Promise<string> {
+  try {
+    const res = await fetch(url);
+    const bytes = await res.arrayBuffer();
+    const path = `${crypto.randomUUID()}.${ext}`;
+    const up = await db.storage
+      .from("contenido")
+      .upload(path, bytes, {
+        contentType: ext === "mp4" ? "video/mp4" : "image/png",
+        upsert: false,
+      });
+    if (!up.error)
+      return db.storage.from("contenido").getPublicUrl(path).data.publicUrl;
+  } catch {
+    /* fallback */
+  }
+  return url;
+}
+
+// Genera una pieza de contenido. Imagen = sincrónico (~20 s). Video = async
+// (se devuelve estado "generando" y se poolea con /:id/refrescar).
 contenido.post("/generar", async (c) => {
   const body = await c.req.json<{
     producto_id?: string;
     plataforma?: "instagram" | "tiktok";
+    formato?: "imagen" | "video";
     objetivo?: string;
   }>();
   const plataforma = body.plataforma === "tiktok" ? "tiktok" : "instagram";
+  const formato = body.formato === "video" ? "video" : "imagen";
   const db = supa(c.env);
 
   let contextoProducto = "un producto de la tienda";
@@ -42,15 +69,15 @@ contenido.post("/generar", async (c) => {
     }
     const { data: ml } = await db
       .from("ml_listings")
-      .select("thumbnail, permalink")
+      .select("thumbnail")
       .eq("product_id", body.producto_id)
       .limit(1)
       .maybeSingle();
-    if (ml?.thumbnail) referencias.push(ml.thumbnail.replace(/^http:/, "https:"));
+    if (ml?.thumbnail)
+      referencias.push(ml.thumbnail.replace(/^http:/, "https:"));
   }
   const hayRef = referencias.length > 0;
 
-  // 1. Claude: prompt de imagen + copy
   const { texto } = await claude(c.env, {
     system: SISTEMA,
     messages: [
@@ -58,12 +85,19 @@ contenido.post("/generar", async (c) => {
         role: "user",
         content: `Producto: ${contextoProducto}
 Plataforma: ${plataforma}
+Formato: ${formato}
 ${body.objetivo ? `Objetivo: ${body.objetivo}` : ""}
-${hayRef ? "Hay una FOTO DE REFERENCIA del producto real: el prompt de imagen debe pedir mejorar/reencuadrar esa foto (mejor luz, fondo limpio con violeta suave, estética editorial kpop), manteniendo el producto tal cual es." : ""}
+${hayRef ? "Hay una FOTO DE REFERENCIA del producto real; el prompt debe mantener el producto tal cual, mejorando luz/fondo/encuadre." : ""}
 
 Devolvé SOLO este JSON:
 {
-  "prompt_imagen": "prompt EN INGLÉS para ${hayRef ? "editar la foto de referencia" : "generar una foto de producto tipo flat-lay o lifestyle"}, estética kpop, colores suaves con violeta, fondo limpio. Detallado, sin texto en la imagen.",
+  "prompt_media": "prompt EN INGLÉS para ${
+    formato === "video"
+      ? "un clip corto vertical mostrando el producto con movimiento suave de cámara"
+      : hayRef
+        ? "editar la foto de referencia"
+        : "una foto de producto tipo flat-lay o lifestyle"
+  }, estética kpop, violeta suave, fondo limpio, sin texto en pantalla",
   "caption": "texto del posteo en español, 2-4 líneas, con gancho al inicio",
   "hashtags": "8-12 hashtags relevantes separados por espacio, en una línea"
 }`,
@@ -73,35 +107,43 @@ Devolvé SOLO este JSON:
   });
   const gen = parseJsonLaxo<GenIA>(texto);
 
-  // 2. kie.ai: imagen (con foto de referencia si el producto la tiene)
-  const { url, taskId } = await generarImagen(c.env, {
-    prompt: gen.prompt_imagen,
+  if (formato === "video") {
+    const taskId = await encolarVideo(c.env, {
+      prompt: gen.prompt_media,
+      aspectRatio: plataforma === "tiktok" ? "9:16" : "9:16",
+      imageUrls: referencias,
+    });
+    const { data: pieza, error } = await db
+      .from("content_pieces")
+      .insert({
+        plataforma,
+        formato: "video",
+        estado: "generando",
+        kie_task_id: taskId,
+        caption: gen.caption,
+        hashtags: gen.hashtags,
+        product_id: body.producto_id ?? null,
+      })
+      .select("*")
+      .single();
+    if (error) return c.json({ error: error.message }, 500);
+    return c.json({ pieza });
+  }
+
+  // imagen
+  const { url } = await generarImagen(c.env, {
+    prompt: gen.prompt_media,
     aspectRatio: plataforma === "tiktok" ? "9:16" : "4:5",
     imageUrls: referencias,
   });
+  const mediaUrl = await guardarEnStorage(db, url, "png");
 
-  // 3. guardar copia en Storage (la URL de kie expira ~24 h)
-  let mediaUrl = url;
-  try {
-    const img = await fetch(url);
-    const bytes = await img.arrayBuffer();
-    const path = `${crypto.randomUUID()}.png`;
-    const up = await db.storage
-      .from("contenido")
-      .upload(path, bytes, { contentType: "image/png", upsert: false });
-    if (!up.error) {
-      mediaUrl = db.storage.from("contenido").getPublicUrl(path).data.publicUrl;
-    }
-  } catch {
-    /* si falla, queda la URL temporal de kie */
-  }
-
-  // 4. persistir
   const { data: pieza, error } = await db
     .from("content_pieces")
     .insert({
       plataforma,
       formato: "imagen",
+      estado: "listo",
       caption: gen.caption,
       hashtags: gen.hashtags,
       media_url: mediaUrl,
@@ -110,15 +152,47 @@ Devolvé SOLO este JSON:
     .select("*")
     .single();
   if (error) return c.json({ error: error.message }, 500);
+  return c.json({ pieza });
+});
 
-  return c.json({ pieza, kie_task: taskId });
+// Poolea un video pendiente y, si terminó, lo baja a Storage.
+contenido.post("/:id/refrescar", async (c) => {
+  const db = supa(c.env);
+  const { data: p } = await db
+    .from("content_pieces")
+    .select("id, estado, kie_task_id")
+    .eq("id", c.req.param("id"))
+    .single();
+  if (!p) return c.json({ error: "no encontrada" }, 404);
+  if (p.estado !== "generando" || !p.kie_task_id)
+    return c.json({ estado: p.estado });
+
+  const st = await estadoVideo(c.env, p.kie_task_id);
+  if (st.estado === "generando") return c.json({ estado: "generando" });
+
+  if (st.estado === "error") {
+    await db
+      .from("content_pieces")
+      .update({ estado: "error", error: st.detalle })
+      .eq("id", p.id);
+    return c.json({ estado: "error", error: st.detalle });
+  }
+
+  const mediaUrl = await guardarEnStorage(db, st.url, "mp4");
+  await db
+    .from("content_pieces")
+    .update({ estado: "listo", media_url: mediaUrl })
+    .eq("id", p.id);
+  return c.json({ estado: "listo", media_url: mediaUrl });
 });
 
 contenido.get("/", async (c) => {
   const db = supa(c.env);
   const { data, error } = await db
     .from("content_pieces")
-    .select("id, plataforma, formato, caption, hashtags, media_url, estado, created_at")
+    .select(
+      "id, plataforma, formato, caption, hashtags, media_url, estado, error, created_at",
+    )
     .order("created_at", { ascending: false })
     .limit(60);
   if (error) return c.json({ error: error.message }, 500);

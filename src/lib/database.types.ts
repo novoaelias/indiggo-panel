@@ -124,10 +124,12 @@ export type Database = {
         Row: {
           caption: string | null;
           created_at: string;
+          error: string | null;
           estado: string;
           formato: string;
           hashtags: string | null;
           id: string;
+          kie_task_id: string | null;
           media_url: string | null;
           plataforma: string;
           product_id: string | null;
@@ -136,10 +138,12 @@ export type Database = {
         Insert: {
           caption?: string | null;
           created_at?: string;
+          error?: string | null;
           estado?: string;
           formato?: string;
           hashtags?: string | null;
           id?: string;
+          kie_task_id?: string | null;
           media_url?: string | null;
           plataforma: string;
           product_id?: string | null;
@@ -148,10 +152,12 @@ export type Database = {
         Update: {
           caption?: string | null;
           created_at?: string;
+          error?: string | null;
           estado?: string;
           formato?: string;
           hashtags?: string | null;
           id?: string;
+          kie_task_id?: string | null;
           media_url?: string | null;
           plataforma?: string;
           product_id?: string | null;

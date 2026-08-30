@@ -76,20 +76,38 @@ Ver [`docs/seguridad.md`](docs/seguridad.md). Resumen:
 
 ```
 src/
-  App.tsx              layout + ruteo (sidebar fijo + drawer mobile)
-  components/          Sidebar, Logo, íconos, primitivos de UI
+  App.tsx              layout + ruteo (sidebar fijo + drawer mobile) + Gate (clave)
+  components/          Sidebar, Logo, Gate, íconos, primitivos de UI
   pages/               Inicio, Publicaciones, Stock, Metricas, Contenido, Configuracion
-  data/mock.ts         datos de muestra del esqueleto (se reemplazan módulo a módulo)
-  lib/                 tipos del dominio + helpers de formato
+  lib/                 api (fetch + hook), auth, theme, format, database.types
 worker/
   index.ts             entry: fetch (Hono) + scheduled (cron)
-  routes/api.ts        /api/health, /api/status
-  cron.ts              handlers de los cron triggers (stub)
-public/brand/          logos exportados del brand guide
+  routes/              api (+ gate), ml, catalogo, panel, ia, contenido
+  lib/                 ml (OAuth), sync, derivar (catálogo), bom (planificador),
+                       alertas, claude, kie, supabase
+supabase/migrations/   0001-0010
+docs/seguridad.md      pasos para PANEL_TOKEN y Cloudflare Access
 ```
+
+## Módulos
+
+| Módulo | Qué hace |
+|---|---|
+| **Inicio** | Resumen del día + alertas automáticas (stock, publicaciones, producción) + últimos pedidos |
+| **Publicaciones** | Lista real de ML · "IA" por fila (reescribe título/desc, aplica a ML) · "+ Crear con IA" (crea en pausa) · "Editar precios" (masivo por %) |
+| **Stock y producción** | Tabs Variantes / Insumos con edición inline · pushea el buffer a ML · planificador que explota la lista de materiales (cuerpos 3D + photocards) |
+| **Métricas** | Ventas por día, totales, ticket, top 5, comparación con el período anterior |
+| **Contenido** | Imagen (nano-banana) o video (Veo3) + caption + hashtags con Claude, usando la foto real del producto |
+| **Configuración** | Conectar ML · derivar catálogo y lista de materiales · grupos e integrantes · estado de conexiones |
+
+## Cómo funciona la sincronización
+
+- OAuth2 + PKCE. El `access_token` (6 h) se refresca solo por cron cada 4 h.
+- Sync completo (publicaciones + variantes + pedidos 60 d) por cron cada hora, y
+  webhook en tiempo real a `/api/ml/notifications` cuando cambia algo.
+- Al final de cada sync se regeneran las alertas.
 
 ## Estado
 
-Esqueleto navegable con datos mock en los 6 módulos, fiel al diseño
-`Panel Indiggo.dc.html`. Próximo: schema en Supabase y conexión módulo por módulo,
-empezando por Stock y Publicaciones.
+Los 6 módulos funcionan con datos reales de la cuenta INDIGGOSTORE. Pendiente:
+Cloudflare Access, carga del stock físico, ajuste fino del BOM.

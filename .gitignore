@@ -7,3 +7,4 @@ dist
 npm-debug.log*
 .vite
 worker-configuration.d.ts
+.claude/settings.local.json

@@ -39,7 +39,8 @@ catalogo.get("/resumen", async (c) => {
 });
 
 // Arma automáticamente la lista de materiales de los holders con variante por
-// integrante (1 cuerpo 3D + 1 photocard de imprenta por variante). Idempotente.
+// integrante (1 cuerpo 3D + 1 llavero 3D propio del holder + 1 photocard de
+// imprenta por variante). Idempotente.
 catalogo.post("/derivar-bom", async (c) => {
   const db = supa(c.env);
   try {

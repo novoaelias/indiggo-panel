@@ -221,11 +221,12 @@ function CatalogoSection() {
     try {
       const r = await api<{
         cuerpos: number;
+        llaveros: number;
         photocards: number;
         vinculos: number;
       }>("/catalogo/derivar-bom", { method: "POST" });
       setBomMsg(
-        `${r.cuerpos} cuerpos 3D + ${r.photocards} photocards, ${r.vinculos} vínculos`,
+        `${r.cuerpos} cuerpos 3D + ${r.llaveros} llaveros 3D + ${r.photocards} photocards, ${r.vinculos} vínculos`,
       );
       reload();
     } catch (e) {

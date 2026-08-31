@@ -1,8 +1,10 @@
 // Lista de materiales (BOM) y planificador de producción.
 //
 // Modelo: un holder con variante por integrante consume, al armarse, 1 "cuerpo"
-// impreso en 3D + 1 photocard (imprenta) del integrante elegido. Los productos
-// simples (mostacillas, clickers, stickers…) se producen directo, sin BOM.
+// (frente + dorso del holder) impreso en 3D + 1 llavero impreso en 3D (propio de
+// ese holder, el de BTS ≠ el de Stray Kids) + 1 photocard (imprenta) del
+// integrante elegido. Los productos simples (mostacillas, clickers, stickers…)
+// se producen directo, sin BOM.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 
@@ -13,6 +15,7 @@ const rec = (s: string) => s.slice(0, 120);
 // ---------- derivación automática del BOM ----------
 export async function derivarBOM(db: DB): Promise<{
   cuerpos: number;
+  llaveros: number;
   photocards: number;
   vinculos: number;
 }> {
@@ -57,9 +60,15 @@ export async function derivarBOM(db: DB): Promise<{
       nombre: cuerpoNombre,
       origen: "impresora3d",
     });
+    const llaveroNombre = rec(`Llavero · ${p.nombre}`);
+    compNuevos.set(llaveroNombre, {
+      nombre: llaveroNombre,
+      origen: "impresora3d",
+    });
 
     for (const v of varsPorProducto.get(p.id) ?? []) {
       vinculos.push({ variantId: v.id, compNombre: cuerpoNombre });
+      vinculos.push({ variantId: v.id, compNombre: llaveroNombre });
       if (v.group_member_id) {
         const pcNombre = rec(
           `Photocard · ${memberLabel.get(v.group_member_id) ?? v.etiqueta}`,
@@ -118,7 +127,9 @@ export async function derivarBOM(db: DB): Promise<{
   // "Photocard · " y no están en el set válido)
   for (const c of comps ?? []) {
     const esAuto =
-      c.nombre.startsWith("Cuerpo · ") || c.nombre.startsWith("Photocard · ");
+      c.nombre.startsWith("Cuerpo · ") ||
+      c.nombre.startsWith("Llavero · ") ||
+      c.nombre.startsWith("Photocard · ");
     if (esAuto && !nombresValidos.has(c.nombre)) {
       await db.from("components").delete().eq("id", c.id);
     }
@@ -130,12 +141,13 @@ export async function derivarBOM(db: DB): Promise<{
       .upsert(vcRows, { onConflict: "variant_id,component_id" });
   }
 
-  const cuerpos = [...compNuevos.values()].filter(
-    (c) => c.origen === "impresora3d",
-  ).length;
+  const nombres = [...compNuevos.keys()];
+  const cuerpos = nombres.filter((n) => n.startsWith("Cuerpo · ")).length;
+  const llaveros = nombres.filter((n) => n.startsWith("Llavero · ")).length;
   return {
     cuerpos,
-    photocards: compNuevos.size - cuerpos,
+    llaveros,
+    photocards: compNuevos.size - cuerpos - llaveros,
     vinculos: vcRows.length,
   };
 }

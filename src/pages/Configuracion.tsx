@@ -31,6 +31,7 @@ export function Configuracion() {
       <div className="flex flex-col gap-8">
         <MercadoLibreSection />
         <CatalogoSection />
+        <UnirPublicacionesSection />
         <GruposSection />
         <ConexionesSection />
       </div>
@@ -242,6 +243,8 @@ function CatalogoSection() {
     try {
       const r = await api<{
         productos_nuevos: number;
+        productos_total: number;
+        productos_agrupados: number;
         variantes_nuevas: number;
         con_integrante: number;
         sin_integrante: number;
@@ -249,7 +252,11 @@ function CatalogoSection() {
         sin_categoria: string[];
       }>("/catalogo/derivar", { method: "POST" });
       setMsg(
-        `+${r.productos_nuevos} productos, +${r.variantes_nuevas} variantes · ` +
+        `${r.productos_total} productos (+${r.productos_nuevos} nuevos${
+          r.productos_agrupados
+            ? `, ${r.productos_agrupados} publicaciones agrupadas`
+            : ""
+        }), +${r.variantes_nuevas} variantes · ` +
           `${r.con_integrante} variantes con integrante, ${r.sin_integrante} sin. ` +
           `Grupos: ${Object.entries(r.grupos_detectados)
             .map(([g, n]) => `${g} (${n})`)
@@ -298,6 +305,276 @@ function CatalogoSection() {
         </p>
         {loading && (
           <span className="ml-3 text-[12.5px] text-ink/40">cargando…</span>
+        )}
+      </Card>
+    </section>
+  );
+}
+
+interface PubAgrupable {
+  id: string;
+  ml_item_id: string;
+  titulo: string;
+  thumbnail: string | null;
+  estado: string;
+  precio: number | null;
+  tiene_variantes: boolean;
+  grupo_id: string | null;
+}
+interface ListingGroup {
+  id: string;
+  nombre: string | null;
+  canonical_listing_id: string;
+}
+
+function UnirPublicacionesSection() {
+  const { data, loading, error, reload } = useApi<{
+    publicaciones: PubAgrupable[];
+    grupos: ListingGroup[];
+    sugerencias: string[][];
+  }>("/catalogo/agrupables");
+
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [principal, setPrincipal] = useState<string>("");
+  const [nombre, setNombre] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string>();
+
+  const pubs = data?.publicaciones ?? [];
+  const byId = new Map(pubs.map((p) => [p.id, p]));
+  const sueltas = pubs.filter((p) => !p.grupo_id);
+
+  function toggle(id: string) {
+    setSel((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      if (!n.has(principal)) setPrincipal(n.size ? [...n][0] : "");
+      return n;
+    });
+  }
+
+  async function unir(ids: string[], canonId: string, label?: string) {
+    setBusy(true);
+    setMsg(undefined);
+    try {
+      const r = await api<{ resumen?: { productos_total: number } }>(
+        "/catalogo/agrupables",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            listing_ids: ids,
+            canonical_listing_id: canonId,
+            nombre: label || undefined,
+          }),
+        },
+      );
+      setMsg(
+        `Unidas ${ids.length} publicaciones. Ahora hay ${r.resumen?.productos_total ?? "?"} productos. Corré “Armar lista de materiales” si tocaste holders.`,
+      );
+      setSel(new Set());
+      setPrincipal("");
+      setNombre("");
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function separar(id: string) {
+    setBusy(true);
+    setMsg(undefined);
+    try {
+      await api(`/catalogo/agrupables/${id}`, { method: "DELETE" });
+      setMsg("Grupo deshecho.");
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Unir publicaciones</h2>
+      <Card>
+        <p className="mb-4 max-w-prose text-[13.5px] text-ink/55">
+          Si tenés varias publicaciones que son el <b>mismo producto físico</b>{" "}
+          (por planes de cuotas, títulos distintos…), unilas: el stock real pasa
+          a ser uno solo y el buffer de ML se publica a todas.
+        </p>
+
+        {loading && <EmptyHint>Cargando publicaciones…</EmptyHint>}
+        {error && <EmptyHint>No se pudo cargar: {error}</EmptyHint>}
+        {msg && (
+          <div className="mb-3 rounded-lg bg-accent-soft px-3 py-2 text-[12.5px] text-accent">
+            {msg}
+          </div>
+        )}
+
+        {/* grupos existentes */}
+        {data && data.grupos.length > 0 && (
+          <div className="mb-5 flex flex-col gap-2">
+            <div className="text-[12px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+              Grupos armados
+            </div>
+            {data.grupos.map((g) => {
+              const miembros = pubs.filter((p) => p.grupo_id === g.id);
+              const canon = byId.get(g.canonical_listing_id);
+              return (
+                <div
+                  key={g.id}
+                  className="rounded-[10px] border border-ink/10 p-3"
+                >
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-semibold">
+                      {g.nombre || canon?.titulo || "Grupo"}
+                    </span>
+                    <button
+                      onClick={() => separar(g.id)}
+                      disabled={busy}
+                      className="rounded-md border border-ink/12 px-2 py-1 text-[11.5px] font-semibold hover:bg-ink/[0.03] disabled:opacity-50"
+                    >
+                      Separar
+                    </button>
+                  </div>
+                  <ul className="flex flex-col gap-0.5">
+                    {miembros.map((m) => (
+                      <li
+                        key={m.id}
+                        className="text-[12px] text-ink/60 [overflow-wrap:anywhere]"
+                      >
+                        {m.id === g.canonical_listing_id ? "★ " : "· "}
+                        {m.titulo}
+                        {m.precio != null && (
+                          <span className="text-ink/35">
+                            {" "}
+                            — ${Math.round(m.precio).toLocaleString("es-AR")}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* sugerencias */}
+        {data && data.sugerencias.length > 0 && (
+          <div className="mb-5 flex flex-col gap-2">
+            <div className="text-[12px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+              Parecidas — ¿son el mismo producto?
+            </div>
+            {data.sugerencias.map((ids, i) => (
+              <div
+                key={i}
+                className="rounded-[10px] border border-dashed border-accent/40 bg-accent-soft/40 p-3"
+              >
+                <ul className="mb-2 flex flex-col gap-0.5">
+                  {ids.map((id) => (
+                    <li
+                      key={id}
+                      className="text-[12px] text-ink/70 [overflow-wrap:anywhere]"
+                    >
+                      · {byId.get(id)?.titulo}
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  onClick={() => {
+                    setSel(new Set(ids));
+                    setPrincipal(
+                      ids.find((id) => byId.get(id)?.estado === "active") ??
+                        ids[0],
+                    );
+                    setMsg(undefined);
+                  }}
+                  disabled={busy}
+                  className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+                >
+                  Seleccionar estas {ids.length} ↓
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* selección manual */}
+        {data && sueltas.length > 0 && (
+          <>
+            <div className="mb-2 text-[12px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+              Elegí a mano ({sel.size} seleccionadas)
+            </div>
+            <div className="max-h-[320px] overflow-y-auto rounded-[10px] border border-ink/10">
+              {sueltas.map((p) => (
+                <label
+                  key={p.id}
+                  className="flex cursor-pointer items-center gap-2.5 border-b border-ink/8 px-3 py-2 last:border-b-0 hover:bg-ink/[0.02]"
+                >
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 shrink-0"
+                    checked={sel.has(p.id)}
+                    onChange={() => toggle(p.id)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[12.5px] font-medium leading-snug [overflow-wrap:anywhere]">
+                      {p.titulo}
+                    </span>
+                    <span className="text-[11px] text-ink/40">
+                      {p.estado}
+                      {p.precio != null &&
+                        ` · $${Math.round(p.precio).toLocaleString("es-AR")}`}
+                      {p.tiene_variantes ? " · con variantes" : ""}
+                    </span>
+                  </span>
+                  {sel.has(p.id) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setPrincipal(p.id);
+                      }}
+                      className={
+                        "shrink-0 rounded px-1.5 py-0.5 text-[10.5px] font-bold " +
+                        (principal === p.id
+                          ? "bg-accent text-white"
+                          : "bg-accent-soft text-accent")
+                      }
+                    >
+                      {principal === p.id ? "★ principal" : "hacer principal"}
+                    </button>
+                  )}
+                </label>
+              ))}
+            </div>
+
+            {sel.size >= 2 && (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <input
+                  value={nombre}
+                  onChange={(e) => setNombre(e.target.value)}
+                  placeholder="Nombre del producto (opcional)"
+                  className="rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
+                />
+                <button
+                  onClick={() => unir([...sel], principal || [...sel][0], nombre)}
+                  disabled={busy}
+                  className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+                >
+                  {busy ? "Uniendo…" : `Unir ${sel.size} publicaciones`}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+        {data && sueltas.length === 0 && data.grupos.length === 0 && (
+          <EmptyHint>No hay publicaciones para agrupar.</EmptyHint>
         )}
       </Card>
     </section>

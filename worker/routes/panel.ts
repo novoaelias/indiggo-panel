@@ -214,16 +214,35 @@ panel.get("/stock", async (c) => {
   type Prod = NonNullable<typeof prods>[number];
   const prodById = new Map((prods ?? []).map((p) => [p.id, p as Prod]));
   const compById = new Map((comps ?? []).map((x) => [x.id, x]));
-  const mlPorVariante = new Map(
-    (mlvs ?? [])
-      .filter((v) => v.product_variant_id)
-      .map((v) => [v.product_variant_id as string, v.cantidad_ml]),
-  );
-  const mlPorProducto = new Map(
-    (mls ?? [])
-      .filter((m) => m.product_id && !m.tiene_variantes)
-      .map((m) => [m.product_id as string, m.cantidad_ml]),
-  );
+  // una variante puede estar en varias publicaciones (grupo): juntamos todas las
+  // cantidades publicadas y marcamos desync si alguna difiere del buffer.
+  const mlPorVariante = new Map<string, number[]>();
+  for (const v of mlvs ?? []) {
+    if (!v.product_variant_id) continue;
+    const arr = mlPorVariante.get(v.product_variant_id) ?? [];
+    arr.push(v.cantidad_ml ?? 0);
+    mlPorVariante.set(v.product_variant_id, arr);
+  }
+  const mlPorProducto = new Map<string, number[]>();
+  for (const m of mls ?? []) {
+    if (!m.product_id || m.tiene_variantes) continue;
+    const arr = mlPorProducto.get(m.product_id) ?? [];
+    arr.push(m.cantidad_ml ?? 0);
+    mlPorProducto.set(m.product_id, arr);
+  }
+  // devuelve el nº publicado para mostrar (o null); desync se calcula aparte
+  const publicadoDe = (
+    variantId: string,
+    productId: string,
+    bufferMl: number,
+  ): number | null => {
+    const arr =
+      mlPorVariante.get(variantId) ?? mlPorProducto.get(productId) ?? [];
+    if (!arr.length) return null;
+    // si alguna difiere, devolvemos esa (para que el front marque desync)
+    const distinta = arr.find((n) => n !== bufferMl);
+    return distinta ?? arr[0];
+  };
   const bomPorVar = new Map<
     string,
     Array<{ component_id: string; cantidad: number }>
@@ -275,8 +294,7 @@ panel.get("/stock", async (c) => {
     const p = prodById.get(v.product_id);
     const bom = bomPorVar.get(v.id) ?? [];
     const esHolder = !!p?.variantes_por_integrante && bom.length > 0;
-    const publicadoMl =
-      mlPorVariante.get(v.id) ?? mlPorProducto.get(v.product_id) ?? null;
+    const publicadoMl = publicadoDe(v.id, v.product_id, v.stock_ml);
     const member =
       (v.group_members as { nombre?: string } | null)?.nombre ?? null;
     const ev = evaluarStock(v.stock_real, v.stock_minimo);
@@ -351,9 +369,20 @@ panel.get("/stock", async (c) => {
     const { _piezaIds, ...rest } = h;
     void _piezaIds;
     rest.photocards.sort((a, b) => a.member.localeCompare(b.member));
+    // vendible real del holder = mín(cuerpos, llaveros, Σ photocards)
+    const min3d = rest.piezas.length
+      ? Math.min(...rest.piezas.map((p) => p.stock_real))
+      : Infinity;
+    const totalPc = rest.photocards.reduce(
+      (s, p) => s + (p.pc_stock_real ?? 0),
+      0,
+    );
     return {
       ...rest,
-      vendibles_total: rest.photocards.reduce((s, p) => s + p.vendibles, 0),
+      vendibles_total: Math.max(
+        0,
+        Math.min(min3d === Infinity ? totalPc : min3d, totalPc),
+      ),
       estado_tono: PEOR([
         ...rest.piezas.map(
           (p) => evaluarStock(p.stock_real, p.stock_minimo).tono,
@@ -404,42 +433,39 @@ panel.patch("/stock/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-// Resuelve una variante interna a su item/variación de ML.
-async function resolverML(
+// Resuelve una variante interna a TODAS sus publicaciones/variaciones de ML.
+// Una variante puede corresponder a varias publicaciones (grupo de publicaciones
+// duplicadas por cuotas): el buffer se publica a todas.
+async function resolverMLTodas(
   db: ReturnType<typeof supa>,
   variantId: string,
-): Promise<{ itemId: string; variationId: string | null } | null> {
+): Promise<Array<{ itemId: string; variationId: string | null }>> {
+  const { data: mlvs } = await db
+    .from("ml_listing_variations")
+    .select("ml_variation_id, ml_listings(ml_item_id)")
+    .eq("product_variant_id", variantId);
+
+  const refs = (mlvs ?? [])
+    .map((v) => {
+      const itemId = (v.ml_listings as { ml_item_id?: string } | null)
+        ?.ml_item_id;
+      return itemId ? { itemId, variationId: v.ml_variation_id } : null;
+    })
+    .filter((x): x is { itemId: string; variationId: string } => x != null);
+  if (refs.length) return refs;
+
+  // sin variaciones: publicación(es) sin variantes a nivel item
   const { data: pv } = await db
     .from("product_variants")
     .select("product_id")
     .eq("id", variantId)
     .single();
-  if (!pv) return null;
-
-  const { data: mlv } = await db
-    .from("ml_listing_variations")
-    .select("ml_variation_id, ml_listing_id")
-    .eq("product_variant_id", variantId)
-    .maybeSingle();
-
-  if (mlv) {
-    const { data: ml } = await db
-      .from("ml_listings")
-      .select("ml_item_id")
-      .eq("id", mlv.ml_listing_id)
-      .single();
-    return ml
-      ? { itemId: ml.ml_item_id, variationId: mlv.ml_variation_id }
-      : null;
-  }
-
-  const { data: ml } = await db
+  if (!pv) return [];
+  const { data: mls } = await db
     .from("ml_listings")
     .select("ml_item_id")
-    .eq("product_id", pv.product_id)
-    .limit(1)
-    .maybeSingle();
-  return ml ? { itemId: ml.ml_item_id, variationId: null } : null;
+    .eq("product_id", pv.product_id);
+  return (mls ?? []).map((m) => ({ itemId: m.ml_item_id, variationId: null }));
 }
 
 // Publica el stock ML (buffer) de una variante en Mercado Libre.
@@ -454,27 +480,35 @@ panel.post("/stock/:id/publicar", async (c) => {
     .single();
   if (!pv) return c.json({ error: "variante no encontrada" }, 404);
 
-  const ref = await resolverML(db, id);
-  if (!ref)
+  const refs = await resolverMLTodas(db, id);
+  if (!refs.length)
     return c.json({ error: "no se pudo mapear a una publicación de ML" }, 409);
 
-  const path = ref.variationId
-    ? `/items/${ref.itemId}/variations/${ref.variationId}`
-    : `/items/${ref.itemId}`;
-  const r = await mlFetch(c.env, db, path, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ available_quantity: pv.stock_ml }),
-  });
-  if (!r.ok)
-    return c.json({ error: (await r.text()).slice(0, 250) }, 502);
-
-  try {
-    await syncOneItem(c.env, db, ref.itemId);
-  } catch {
-    /* el push ya se hizo */
+  const errores: string[] = [];
+  const items = new Set<string>();
+  for (const ref of refs) {
+    const path = ref.variationId
+      ? `/items/${ref.itemId}/variations/${ref.variationId}`
+      : `/items/${ref.itemId}`;
+    const r = await mlFetch(c.env, db, path, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ available_quantity: pv.stock_ml }),
+    });
+    if (r.ok) items.add(ref.itemId);
+    else errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 150)}`);
   }
-  return c.json({ ok: true, publicado: pv.stock_ml });
+  if (!items.size)
+    return c.json({ error: errores.join(" · ").slice(0, 300) }, 502);
+
+  for (const it of items) {
+    try {
+      await syncOneItem(c.env, db, it);
+    } catch {
+      /* el push ya se hizo */
+    }
+  }
+  return c.json({ ok: true, publicado: pv.stock_ml, publicaciones: items.size, errores });
 });
 
 // Publica en ML el buffer de todas las variantes que están desincronizadas.
@@ -490,46 +524,54 @@ panel.post("/stock/publicar-todo", async (c) => {
     db.from("ml_listing_variations").select("product_variant_id, cantidad_ml"),
     db.from("ml_listings").select("product_id, cantidad_ml, tiene_variantes"),
   ]);
-  const mlPorVar = new Map(
-    (mlvs ?? [])
-      .filter((v) => v.product_variant_id)
-      .map((v) => [v.product_variant_id as string, v.cantidad_ml]),
-  );
-  const mlPorProd = new Map(
-    (mls ?? [])
-      .filter((m) => m.product_id && !m.tiene_variantes)
-      .map((m) => [m.product_id as string, m.cantidad_ml]),
-  );
+  const mlPorVar = new Map<string, number[]>();
+  for (const v of mlvs ?? []) {
+    if (!v.product_variant_id) continue;
+    const arr = mlPorVar.get(v.product_variant_id) ?? [];
+    arr.push(v.cantidad_ml ?? 0);
+    mlPorVar.set(v.product_variant_id, arr);
+  }
+  const mlPorProd = new Map<string, number[]>();
+  for (const m of mls ?? []) {
+    if (!m.product_id || m.tiene_variantes) continue;
+    const arr = mlPorProd.get(m.product_id) ?? [];
+    arr.push(m.cantidad_ml ?? 0);
+    mlPorProd.set(m.product_id, arr);
+  }
 
   const pendientes = (vars ?? []).filter((v) => {
-    const live = mlPorVar.get(v.id) ?? mlPorProd.get(v.product_id) ?? null;
-    return live != null && live !== v.stock_ml;
+    const live = mlPorVar.get(v.id) ?? mlPorProd.get(v.product_id) ?? [];
+    return live.some((n) => n !== v.stock_ml);
   });
 
   let ok = 0;
   const errores: string[] = [];
   const itemsTocados = new Set<string>();
 
-  for (const v of pendientes.slice(0, 120)) {
-    const ref = await resolverML(db, v.id);
-    if (!ref) {
+  for (const v of pendientes.slice(0, 60)) {
+    const refs = await resolverMLTodas(db, v.id);
+    if (!refs.length) {
       errores.push(`${v.id}: sin mapeo`);
       continue;
     }
-    const path = ref.variationId
-      ? `/items/${ref.itemId}/variations/${ref.variationId}`
-      : `/items/${ref.itemId}`;
-    const r = await mlFetch(c.env, db, path, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ available_quantity: v.stock_ml }),
-    });
-    if (r.ok) {
-      ok++;
-      itemsTocados.add(ref.itemId);
-    } else {
-      errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 120)}`);
+    let algunoOk = false;
+    for (const ref of refs) {
+      const path = ref.variationId
+        ? `/items/${ref.itemId}/variations/${ref.variationId}`
+        : `/items/${ref.itemId}`;
+      const r = await mlFetch(c.env, db, path, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ available_quantity: v.stock_ml }),
+      });
+      if (r.ok) {
+        algunoOk = true;
+        itemsTocados.add(ref.itemId);
+      } else {
+        errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 100)}`);
+      }
     }
+    if (algunoOk) ok++;
   }
 
   for (const it of itemsTocados) {

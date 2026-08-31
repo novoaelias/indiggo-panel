@@ -50,6 +50,139 @@ catalogo.post("/derivar-bom", async (c) => {
   }
 });
 
+// ---------------- Agrupar publicaciones (mismo producto físico) ----------------
+const RUIDO = new Set([
+  "combo","porta","holder","photocard","pc","de","tu","bias","llavero","charm",
+  "con","y","para","el","la","kpop","bts","stray","kids","straykids","skz",
+  "cuotas","cuota","sin","interes","interés","hasta","x3","x6","x9","x12","3","6","9","12",
+  "mercado","libre","full","envio","envío","gratis","+","-","el","del","un","una","random",
+]);
+const tokens = (s: string) =>
+  new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !RUIDO.has(w)),
+  );
+const jaccard = (a: Set<string>, b: Set<string>) => {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+};
+
+catalogo.get("/agrupables", async (c) => {
+  const db = supa(c.env);
+  const [{ data: listings, error }, { data: grupos }] = await Promise.all([
+    db
+      .from("ml_listings")
+      .select(
+        "id, ml_item_id, titulo, thumbnail, estado, precio, tiene_variantes, grupo_id",
+      )
+      .order("titulo"),
+    db.from("listing_groups").select("id, nombre, canonical_listing_id"),
+  ]);
+  if (error) return c.json({ error: error.message }, 500);
+
+  const ls = listings ?? [];
+  const sueltas = ls.filter((l) => !l.grupo_id);
+
+  // sugerencias: por thumbnail idéntico o por título muy parecido
+  const tokMap = new Map(sueltas.map((l) => [l.id, tokens(l.titulo)]));
+  const usados = new Set<string>();
+  const sugerencias: string[][] = [];
+  for (let i = 0; i < sueltas.length; i++) {
+    const a = sueltas[i];
+    if (usados.has(a.id)) continue;
+    const cluster = [a.id];
+    for (let j = i + 1; j < sueltas.length; j++) {
+      const b = sueltas[j];
+      if (usados.has(b.id)) continue;
+      const mismoThumb =
+        a.thumbnail && b.thumbnail && a.thumbnail === b.thumbnail;
+      const parecido = jaccard(tokMap.get(a.id)!, tokMap.get(b.id)!) >= 0.5;
+      if (mismoThumb || parecido) cluster.push(b.id);
+    }
+    if (cluster.length > 1) {
+      cluster.forEach((id) => usados.add(id));
+      sugerencias.push(cluster);
+    }
+  }
+
+  return c.json({
+    publicaciones: ls,
+    grupos: grupos ?? [],
+    sugerencias,
+  });
+});
+
+catalogo.post("/agrupables", async (c) => {
+  const body = await c.req.json<{
+    listing_ids?: string[];
+    canonical_listing_id?: string;
+    nombre?: string;
+  }>();
+  const ids = [...new Set(body.listing_ids ?? [])];
+  const canon = body.canonical_listing_id;
+  if (ids.length < 2 || !canon || !ids.includes(canon))
+    return c.json({ error: "elegí 2+ publicaciones y una principal" }, 400);
+
+  const db = supa(c.env);
+  // sacar estas publicaciones de cualquier grupo previo
+  await db
+    .from("ml_listings")
+    .update({ grupo_id: null })
+    .in("id", ids);
+  await limpiarGruposVacios(db);
+
+  const { data: grupo, error } = await db
+    .from("listing_groups")
+    .insert({ canonical_listing_id: canon, nombre: body.nombre?.trim() || null })
+    .select("id")
+    .single();
+  if (error) return c.json({ error: error.message }, 500);
+
+  const { error: e2 } = await db
+    .from("ml_listings")
+    .update({ grupo_id: grupo.id })
+    .in("id", ids);
+  if (e2) return c.json({ error: e2.message }, 500);
+
+  try {
+    const resumen = await derivarCatalogo(db);
+    return c.json({ id: grupo.id, resumen });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+catalogo.delete("/agrupables/:id", async (c) => {
+  const db = supa(c.env);
+  const id = c.req.param("id");
+  await db.from("ml_listings").update({ grupo_id: null }).eq("grupo_id", id);
+  await db.from("listing_groups").delete().eq("id", id);
+  try {
+    const resumen = await derivarCatalogo(db);
+    return c.json({ resumen });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+async function limpiarGruposVacios(db: ReturnType<typeof supa>) {
+  const [{ data: grupos }, { data: usados }] = await Promise.all([
+    db.from("listing_groups").select("id"),
+    db.from("ml_listings").select("grupo_id").not("grupo_id", "is", null),
+  ]);
+  const conUso = new Set((usados ?? []).map((l) => l.grupo_id));
+  const vacios = (grupos ?? [])
+    .map((g) => g.id)
+    .filter((gid) => !conUso.has(gid));
+  if (vacios.length)
+    await db.from("listing_groups").delete().in("id", vacios);
+}
+
 // --- Grupos e integrantes ---
 catalogo.get("/grupos", async (c) => {
   const db = supa(c.env);

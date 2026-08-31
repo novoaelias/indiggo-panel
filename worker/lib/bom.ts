@@ -27,7 +27,8 @@ export async function derivarBOM(db: DB): Promise<{
 
   const { data: variants } = await db
     .from("product_variants")
-    .select("id, product_id, group_member_id, etiqueta");
+    .select("id, product_id, group_member_id, etiqueta")
+    .eq("activo", true);
 
   const { data: gm } = await db
     .from("group_members")
@@ -79,6 +80,51 @@ export async function derivarBOM(db: DB): Promise<{
           group_member_id: v.group_member_id,
         });
         vinculos.push({ variantId: v.id, compNombre: pcNombre });
+      }
+    }
+  }
+
+  // --- si un Cuerpo/Llavero cambió de nombre (ej. merge de publicaciones que
+  //     renombra el producto), renombrar el componente existente en vez de
+  //     crear uno nuevo y perder el stock que cargó Elias ---
+  const { data: compsPre } = await db
+    .from("components")
+    .select("id, nombre, origen, stock_real");
+  const { data: vcPre } = await db
+    .from("variant_components")
+    .select("variant_id, component_id");
+  const compByIdPre = new Map((compsPre ?? []).map((c) => [c.id, c]));
+  const nombreExistePre = new Set((compsPre ?? []).map((c) => c.nombre));
+  const prodPorVariant = new Map(
+    (variants ?? []).map((v) => [v.id, v.product_id]),
+  );
+  const auto3dPorProd = new Map<string, Set<string>>();
+  for (const r of vcPre ?? []) {
+    const c = compByIdPre.get(r.component_id);
+    const pid = prodPorVariant.get(r.variant_id);
+    if (
+      !c ||
+      !pid ||
+      c.origen !== "impresora3d" ||
+      !(c.nombre.startsWith("Cuerpo · ") || c.nombre.startsWith("Llavero · "))
+    )
+      continue;
+    if (!auto3dPorProd.has(pid)) auto3dPorProd.set(pid, new Set());
+    auto3dPorProd.get(pid)!.add(r.component_id);
+  }
+  for (const p of prods ?? []) {
+    const usados = [...(auto3dPorProd.get(p.id) ?? [])]
+      .map((id) => compByIdPre.get(id))
+      .filter(Boolean) as Array<{ id: string; nombre: string }>;
+    for (const rol of ["Cuerpo", "Llavero"] as const) {
+      const deseado = rec(`${rol} · ${p.nombre}`);
+      const actual = usados.find((c) => c.nombre.startsWith(`${rol} · `));
+      if (actual && actual.nombre !== deseado && !nombreExistePre.has(deseado)) {
+        await db
+          .from("components")
+          .update({ nombre: deseado })
+          .eq("id", actual.id);
+        nombreExistePre.add(deseado);
       }
     }
   }

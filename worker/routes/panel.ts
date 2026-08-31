@@ -133,44 +133,87 @@ panel.get("/metricas", async (c) => {
 });
 
 // --- Stock y producción ---
-interface VarRow {
-  id: string;
-  product_id: string;
-  etiqueta: string;
-  stock_real: number;
-  stock_ml: number;
-  stock_minimo: number;
-  activo: boolean;
-  products: {
-    nombre: string;
-    categories: { nombre: string; origen: string } | null;
-    groups: { nombre: string } | null;
-  } | null;
-  group_members: { nombre: string } | null;
+function evaluarStock(real: number, minimo: number) {
+  if (real <= 0) return { tono: "danger" as const, label: "Sin stock" };
+  if (minimo > 0 && real <= Math.ceil(minimo * 0.4))
+    return { tono: "danger" as const, label: "Crítico" };
+  if (real < minimo) return { tono: "warn" as const, label: "Bajo" };
+  return { tono: "ok" as const, label: "OK" };
 }
 
-function evaluarStock(real: number, minimo: number) {
-  if (real <= 0) return { tono: "danger", label: "Sin stock" };
-  if (real <= Math.ceil(minimo * 0.4)) return { tono: "danger", label: "Crítico" };
-  if (real < minimo) return { tono: "warn", label: "Bajo" };
-  return { tono: "ok", label: "OK" };
+const PEOR = (t: string[]): "danger" | "warn" | "ok" =>
+  t.includes("danger") ? "danger" : t.includes("warn") ? "warn" : "ok";
+
+// El "vendible" de un holder + integrante (product_variants.stock_real) se deriva
+// de las piezas reales que carga Elias: mín sobre cada componente del BOM de
+// floor(stock_componente / cantidad). Nunca se edita a mano.
+async function recalcularDerivado(db: ReturnType<typeof supa>) {
+  const { data: vc } = await db
+    .from("variant_components")
+    .select("variant_id, component_id, cantidad");
+  if (!vc?.length) return;
+  const { data: comps } = await db.from("components").select("id, stock_real");
+  const stockComp = new Map((comps ?? []).map((x) => [x.id, x.stock_real]));
+  const porVar = new Map<
+    string,
+    Array<{ component_id: string; cantidad: number }>
+  >();
+  for (const r of vc) {
+    if (!porVar.has(r.variant_id)) porVar.set(r.variant_id, []);
+    porVar.get(r.variant_id)!.push(r);
+  }
+  const { data: vars } = await db
+    .from("product_variants")
+    .select("id, stock_real")
+    .in("id", [...porVar.keys()]);
+  for (const v of vars ?? []) {
+    const lines = porVar.get(v.id)!;
+    const real = Math.min(
+      ...lines.map((l) =>
+        Math.floor((stockComp.get(l.component_id) ?? 0) / (l.cantidad || 1)),
+      ),
+    );
+    if (real !== v.stock_real)
+      await db
+        .from("product_variants")
+        .update({ stock_real: real })
+        .eq("id", v.id);
+  }
 }
 
 panel.get("/stock", async (c) => {
   const db = supa(c.env);
-  const { data, error } = await db
-    .from("product_variants")
-    .select(
-      "id, product_id, etiqueta, stock_real, stock_ml, stock_minimo, activo, products(nombre, categories(nombre, origen), groups(nombre)), group_members(nombre)",
-    )
-    .eq("activo", true);
-  if (error) return c.json({ error: error.message }, 500);
+  await recalcularDerivado(db);
 
-  // valor de stock realmente publicado hoy en ML
-  const [{ data: mlvs }, { data: mls }] = await Promise.all([
+  const [
+    { data: variants, error },
+    { data: prods },
+    { data: mlvs },
+    { data: mls },
+    { data: vc },
+    { data: comps },
+  ] = await Promise.all([
+    db
+      .from("product_variants")
+      .select(
+        "id, product_id, etiqueta, stock_real, stock_ml, stock_minimo, group_members(nombre)",
+      )
+      .eq("activo", true),
+    db
+      .from("products")
+      .select(
+        "id, nombre, variantes_por_integrante, categories(nombre, origen), groups(nombre)",
+      ),
     db.from("ml_listing_variations").select("product_variant_id, cantidad_ml"),
     db.from("ml_listings").select("product_id, cantidad_ml, tiene_variantes"),
+    db.from("variant_components").select("variant_id, component_id, cantidad"),
+    db.from("components").select("id, nombre, origen, stock_real, stock_minimo"),
   ]);
+  if (error) return c.json({ error: error.message }, 500);
+
+  type Prod = NonNullable<typeof prods>[number];
+  const prodById = new Map((prods ?? []).map((p) => [p.id, p as Prod]));
+  const compById = new Map((comps ?? []).map((x) => [x.id, x]));
   const mlPorVariante = new Map(
     (mlvs ?? [])
       .filter((v) => v.product_variant_id)
@@ -181,47 +224,157 @@ panel.get("/stock", async (c) => {
       .filter((m) => m.product_id && !m.tiene_variantes)
       .map((m) => [m.product_id as string, m.cantidad_ml]),
   );
+  const bomPorVar = new Map<
+    string,
+    Array<{ component_id: string; cantidad: number }>
+  >();
+  for (const r of vc ?? []) {
+    if (!bomPorVar.has(r.variant_id)) bomPorVar.set(r.variant_id, []);
+    bomPorVar.get(r.variant_id)!.push(r);
+  }
 
-  const rows = (data ?? []) as unknown as VarRow[];
-  const items = rows.map((r) => {
-    const prodNombre = r.products?.nombre ?? "—";
-    const esUnico = r.etiqueta === "Único";
-    const nombre = esUnico
-      ? prodNombre
-      : `${prodNombre} — ${r.group_members?.nombre ?? r.etiqueta}`;
-    const ev = evaluarStock(r.stock_real, r.stock_minimo);
+  const nombreCat = (p?: Prod) =>
+    (p?.categories as { nombre?: string } | null)?.nombre ?? null;
+  const origenCat = (p?: Prod) =>
+    (p?.categories as { origen?: string } | null)?.origen ?? "impresora3d";
+  const nombreGrp = (p?: Prod) =>
+    (p?.groups as { nombre?: string } | null)?.nombre ?? null;
+
+  interface Holder {
+    product_id: string;
+    nombre: string;
+    categoria: string | null;
+    grupo: string | null;
+    piezas: Array<{
+      component_id: string;
+      nombre: string;
+      stock_real: number;
+      stock_minimo: number;
+    }>;
+    photocards: Array<{
+      variant_id: string;
+      member: string;
+      component_id: string | null;
+      pc_stock_real: number | null;
+      pc_stock_minimo: number | null;
+      vendibles: number;
+      stock_minimo: number;
+      stock_ml: number;
+      publicado_ml: number | null;
+      estado_tono: string;
+      estado_label: string;
+    }>;
+    _piezaIds: Set<string>;
+  }
+
+  const simples: Array<Record<string, unknown>> = [];
+  const holdersMap = new Map<string, Holder>();
+  let bajo = 0;
+
+  for (const v of variants ?? []) {
+    const p = prodById.get(v.product_id);
+    const bom = bomPorVar.get(v.id) ?? [];
+    const esHolder = !!p?.variantes_por_integrante && bom.length > 0;
     const publicadoMl =
-      mlPorVariante.get(r.id) ?? mlPorProducto.get(r.product_id) ?? null;
-    return {
-      id: r.id,
-      nombre,
-      categoria: r.products?.categories?.nombre ?? "Sin categoría",
-      origen: r.products?.categories?.origen ?? "impresora3d",
-      grupo: r.products?.groups?.nombre ?? null,
-      stock_real: r.stock_real,
-      stock_ml: r.stock_ml,
+      mlPorVariante.get(v.id) ?? mlPorProducto.get(v.product_id) ?? null;
+    const member =
+      (v.group_members as { nombre?: string } | null)?.nombre ?? null;
+    const ev = evaluarStock(v.stock_real, v.stock_minimo);
+    if (v.stock_real < v.stock_minimo) bajo++;
+
+    if (!esHolder) {
+      const prodNombre = p?.nombre ?? "—";
+      simples.push({
+        id: v.id,
+        nombre:
+          v.etiqueta === "Único" || !member
+            ? prodNombre
+            : `${prodNombre} — ${member}`,
+        categoria: nombreCat(p) ?? "Sin categoría",
+        origen: origenCat(p),
+        grupo: nombreGrp(p),
+        stock_real: v.stock_real,
+        stock_ml: v.stock_ml,
+        publicado_ml: publicadoMl,
+        stock_minimo: v.stock_minimo,
+        estado_tono: ev.tono,
+        estado_label: ev.label,
+      });
+      continue;
+    }
+
+    let h = holdersMap.get(v.product_id);
+    if (!h) {
+      h = {
+        product_id: v.product_id,
+        nombre: p!.nombre,
+        categoria: nombreCat(p) ?? "Holders",
+        grupo: nombreGrp(p),
+        piezas: [],
+        photocards: [],
+        _piezaIds: new Set(),
+      };
+      holdersMap.set(v.product_id, h);
+    }
+    for (const line of bom) {
+      const comp = compById.get(line.component_id);
+      if (!comp || comp.origen === "imprenta" || h._piezaIds.has(comp.id))
+        continue;
+      h._piezaIds.add(comp.id);
+      h.piezas.push({
+        component_id: comp.id,
+        nombre: comp.nombre.startsWith("Llavero · ") ? "Llavero" : "Cuerpo",
+        stock_real: comp.stock_real,
+        stock_minimo: comp.stock_minimo,
+      });
+    }
+    const pcLine = bom.find(
+      (l) => compById.get(l.component_id)?.origen === "imprenta",
+    );
+    const pc = pcLine ? compById.get(pcLine.component_id) : null;
+    h.photocards.push({
+      variant_id: v.id,
+      member: member ?? v.etiqueta,
+      component_id: pc?.id ?? null,
+      pc_stock_real: pc?.stock_real ?? null,
+      pc_stock_minimo: pc?.stock_minimo ?? null,
+      vendibles: v.stock_real,
+      stock_minimo: v.stock_minimo,
+      stock_ml: v.stock_ml,
       publicado_ml: publicadoMl,
-      stock_minimo: r.stock_minimo,
       estado_tono: ev.tono,
       estado_label: ev.label,
+    });
+  }
+
+  const holders = [...holdersMap.values()].map((h) => {
+    const { _piezaIds, ...rest } = h;
+    void _piezaIds;
+    rest.photocards.sort((a, b) => a.member.localeCompare(b.member));
+    return {
+      ...rest,
+      vendibles_total: rest.photocards.reduce((s, p) => s + p.vendibles, 0),
+      estado_tono: PEOR([
+        ...rest.piezas.map(
+          (p) => evaluarStock(p.stock_real, p.stock_minimo).tono,
+        ),
+        ...rest.photocards.map((p) => p.estado_tono),
+      ]),
     };
   });
-  items.sort((a, b) => a.stock_real - a.stock_minimo - (b.stock_real - b.stock_minimo));
-
-  const cola = items
-    .filter((i) => i.stock_real < i.stock_minimo)
-    .map((i) => ({
-      id: i.id,
-      nombre: i.nombre,
-      origen: i.origen,
-      cantidad: Math.max(i.stock_minimo * 2 - i.stock_real, i.stock_minimo),
-    }));
+  holders.sort((a, b) => a.nombre.localeCompare(b.nombre));
+  simples.sort(
+    (a, b) =>
+      (a.stock_real as number) -
+      (a.stock_minimo as number) -
+      ((b.stock_real as number) - (b.stock_minimo as number)),
+  );
 
   return c.json({
-    items,
-    cola,
-    bajo_minimo: items.filter((i) => i.stock_real < i.stock_minimo).length,
-    sin_catalogo: items.length === 0,
+    simples,
+    holders,
+    bajo_minimo: bajo,
+    sin_catalogo: (variants?.length ?? 0) === 0,
   });
 });
 
@@ -393,6 +546,7 @@ panel.post("/stock/publicar-todo", async (c) => {
 // --- Planificador de producción (explota el BOM) ---
 panel.get("/produccion", async (c) => {
   const db = supa(c.env);
+  await recalcularDerivado(db);
   return c.json(await planificar(db));
 });
 
@@ -425,6 +579,7 @@ panel.patch("/componentes/:id", async (c) => {
     .update(patch as Database["public"]["Tables"]["components"]["Update"])
     .eq("id", id);
   if (error) return c.json({ error: error.message }, 500);
+  await recalcularDerivado(db);
   return c.json({ ok: true });
 });
 

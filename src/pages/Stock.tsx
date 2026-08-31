@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Badge, Card, EmptyHint, PageHeader, cx } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
-import type { EstadoTono } from "@/lib/types";
 
-interface StockItem {
+type Tono = "ok" | "warn" | "danger";
+
+interface SimpleItem {
   id: string;
   nombre: string;
   categoria: string;
@@ -13,11 +14,41 @@ interface StockItem {
   stock_ml: number;
   publicado_ml: number | null;
   stock_minimo: number;
-  estado_tono: EstadoTono;
+  estado_tono: Tono;
   estado_label: string;
 }
+interface Pieza {
+  component_id: string;
+  nombre: string;
+  stock_real: number;
+  stock_minimo: number;
+}
+interface PhotocardRow {
+  variant_id: string;
+  member: string;
+  component_id: string | null;
+  pc_stock_real: number | null;
+  pc_stock_minimo: number | null;
+  vendibles: number;
+  stock_minimo: number;
+  stock_ml: number;
+  publicado_ml: number | null;
+  estado_tono: Tono;
+  estado_label: string;
+}
+interface Holder {
+  product_id: string;
+  nombre: string;
+  categoria: string | null;
+  grupo: string | null;
+  piezas: Pieza[];
+  photocards: PhotocardRow[];
+  vendibles_total: number;
+  estado_tono: Tono;
+}
 interface StockResp {
-  items: StockItem[];
+  simples: SimpleItem[];
+  holders: Holder[];
   bajo_minimo: number;
   sin_catalogo: boolean;
 }
@@ -51,6 +82,15 @@ const ORIGEN_LABEL: Record<string, string> = {
   mixto: "Otros",
 };
 
+function desyncCount(d: StockResp): number {
+  const dm = (p: number | null, ml: number) => p != null && p !== ml;
+  let n = 0;
+  for (const s of d.simples) if (dm(s.publicado_ml, s.stock_ml)) n++;
+  for (const h of d.holders)
+    for (const pc of h.photocards) if (dm(pc.publicado_ml, pc.stock_ml)) n++;
+  return n;
+}
+
 export function Stock() {
   const stock = useApi<StockResp>("/stock");
   const plan = useApi<Plan>("/produccion");
@@ -58,16 +98,18 @@ export function Stock() {
   const [pushAll, setPushAll] = useState(false);
 
   const d = stock.data;
-  const desync =
-    d?.items.filter(
-      (i) => i.publicado_ml != null && i.publicado_ml !== i.stock_ml,
-    ).length ?? 0;
+  const desync = d ? desyncCount(d) : 0;
+
+  function recargar() {
+    stock.reload();
+    plan.reload();
+  }
 
   async function publicarTodo() {
     setPushAll(true);
     try {
       await api("/stock/publicar-todo", { method: "POST" });
-      stock.reload();
+      recargar();
     } finally {
       setPushAll(false);
     }
@@ -109,7 +151,7 @@ export function Stock() {
                       : "text-ink/55 hover:bg-ink/[0.03]",
                   )}
                 >
-                  {t}
+                  {t === "insumos" ? "Piezas sueltas" : "Productos"}
                 </button>
               ))}
               {tab === "variantes" && desync > 0 && (
@@ -124,33 +166,37 @@ export function Stock() {
             </div>
 
             {tab === "variantes" ? (
-              <Card padding={false} className="overflow-hidden">
-                <div className="overflow-x-auto">
-                  <div className="min-w-[480px]">
-                    <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
-                      <div>Variante</div>
-                      <div className="text-right">Real</div>
-                      <div className="text-right">Mín.</div>
-                      <div className="text-right">ML</div>
-                      <div className="text-right">Estado</div>
+              <div className="flex flex-col gap-3">
+                {d.holders.map((h) => (
+                  <HolderCard key={h.product_id} holder={h} onSaved={recargar} />
+                ))}
+
+                {d.simples.length > 0 && (
+                  <Card padding={false} className="overflow-hidden">
+                    <div className="border-b hairline px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+                      Otros productos
                     </div>
-                    <div className="max-h-[70vh] overflow-y-auto">
-                      {d.items.map((i) => (
-                        <StockFila
-                          key={i.id}
-                          item={i}
-                          onSaved={() => {
-                            stock.reload();
-                            plan.reload();
-                          }}
-                        />
-                      ))}
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[480px]">
+                        <div className="grid grid-cols-[1.7fr_0.6fr_0.6fr_1fr_0.7fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+                          <div>Producto</div>
+                          <div className="text-right">Real</div>
+                          <div className="text-right">Mín.</div>
+                          <div className="text-right">ML</div>
+                          <div className="text-right">Estado</div>
+                        </div>
+                        <div className="max-h-[60vh] overflow-y-auto">
+                          {d.simples.map((i) => (
+                            <SimpleFila key={i.id} item={i} onSaved={recargar} />
+                          ))}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              </Card>
+                  </Card>
+                )}
+              </div>
             ) : (
-              <InsumosTab onSaved={plan.reload} />
+              <InsumosTab onSaved={recargar} />
             )}
           </div>
 
@@ -221,6 +267,217 @@ export function Stock() {
   );
 }
 
+function HolderCard({
+  holder,
+  onSaved,
+}: {
+  holder: Holder;
+  onSaved: () => void;
+}) {
+  const [abierto, setAbierto] = useState(false);
+
+  return (
+    <Card padding={false} className="overflow-hidden">
+      <button
+        onClick={() => setAbierto((v) => !v)}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-ink/[0.02]"
+      >
+        <span
+          className={cx(
+            "text-ink/35 transition-transform",
+            abierto && "rotate-90",
+          )}
+        >
+          ▸
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[13.5px] font-semibold leading-snug [overflow-wrap:anywhere]">
+            {holder.nombre}
+          </span>
+          <span className="text-[11px] text-ink/40">
+            {holder.grupo ?? "Holders"} · {holder.photocards.length} integrantes
+          </span>
+        </span>
+        <span className="shrink-0 text-right">
+          <span className="block text-[11px] uppercase tracking-[0.03em] text-ink/40">
+            Vendibles
+          </span>
+          <span className="text-[15px] font-bold tabular-nums">
+            {holder.vendibles_total}
+          </span>
+        </span>
+        <Badge tono={holder.estado_tono}>
+          {holder.estado_tono === "danger"
+            ? "Falta"
+            : holder.estado_tono === "warn"
+              ? "Bajo"
+              : "OK"}
+        </Badge>
+      </button>
+
+      {abierto && (
+        <div className="border-t hairline">
+          <div className="px-4 py-3">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+              Piezas 3D del holder
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {holder.piezas.map((p) => (
+                <div
+                  key={p.component_id}
+                  className="grid grid-cols-[1fr_auto_auto] items-center gap-2"
+                >
+                  <span className="text-[13px] font-medium">{p.nombre}</span>
+                  <NumeroEditable
+                    valor={p.stock_real}
+                    label="real"
+                    onGuardar={(v) =>
+                      api(`/componentes/${p.component_id}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ stock_real: v }),
+                      }).then(onSaved)
+                    }
+                  />
+                  <NumeroEditable
+                    valor={p.stock_minimo}
+                    label="mín"
+                    onGuardar={(v) =>
+                      api(`/componentes/${p.component_id}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ stock_minimo: v }),
+                      }).then(onSaved)
+                    }
+                  />
+                </div>
+              ))}
+              {holder.piezas.length === 0 && (
+                <div className="text-[12px] text-ink/40">
+                  Sin piezas 3D en la lista de materiales. Regenerá el BOM en
+                  Configuración → Catálogo.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t hairline px-4 py-3">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
+              Photocards por integrante
+            </div>
+            <div className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-x-2 gap-y-1 text-[10.5px] font-semibold uppercase tracking-[0.02em] text-ink/35">
+              <div>Integrante</div>
+              <div className="text-right">PC real</div>
+              <div className="text-right">PC mín</div>
+              <div className="text-right">Vend.</div>
+              <div className="text-right">ML</div>
+            </div>
+            <div className="mt-1 flex flex-col">
+              {holder.photocards.map((pc) => (
+                <PhotocardFila key={pc.variant_id} pc={pc} onSaved={onSaved} />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function PhotocardFila({
+  pc,
+  onSaved,
+}: {
+  pc: PhotocardRow;
+  onSaved: () => void;
+}) {
+  const [publicando, setPublicando] = useState(false);
+  const desincronizado =
+    pc.publicado_ml != null && pc.publicado_ml !== pc.stock_ml;
+
+  async function publicar() {
+    setPublicando(true);
+    try {
+      await api(`/stock/${pc.variant_id}/publicar`, { method: "POST" });
+      onSaved();
+    } finally {
+      setPublicando(false);
+    }
+  }
+
+  return (
+    <div className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-x-2 border-b hairline py-1.5 last:border-b-0">
+      <span className="text-[13px] font-medium [overflow-wrap:anywhere]">
+        {pc.member}
+      </span>
+      {pc.component_id ? (
+        <>
+          <NumeroEditable
+            valor={pc.pc_stock_real ?? 0}
+            label="real"
+            onGuardar={(v) =>
+              api(`/componentes/${pc.component_id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ stock_real: v }),
+              }).then(onSaved)
+            }
+          />
+          <NumeroEditable
+            valor={pc.pc_stock_minimo ?? 0}
+            label="mín"
+            onGuardar={(v) =>
+              api(`/componentes/${pc.component_id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ stock_minimo: v }),
+              }).then(onSaved)
+            }
+          />
+        </>
+      ) : (
+        <>
+          <span
+            className="px-1.5 text-right text-[12px] text-ink/30"
+            title="Variante sin photocard fija (ej. Random)"
+          >
+            —
+          </span>
+          <span className="px-1.5 text-right text-[12px] text-ink/30">—</span>
+        </>
+      )}
+      <span
+        className={cx(
+          "px-1.5 text-right text-[13.5px] font-bold tabular-nums",
+          pc.vendibles === 0 && "text-danger",
+        )}
+      >
+        {pc.vendibles}
+      </span>
+      <div className="flex items-center justify-end gap-1">
+        {desincronizado &&
+          (publicando ? (
+            <span className="text-[10px] text-ink/40">…</span>
+          ) : (
+            <button
+              onClick={publicar}
+              title={`En ML hay ${pc.publicado_ml}. Publicar ${pc.stock_ml}.`}
+              className="rounded bg-accent-soft px-1 py-0.5 text-[10px] font-bold text-accent"
+            >
+              ↑
+            </button>
+          ))}
+        <NumeroEditable
+          valor={pc.stock_ml}
+          label="ML"
+          onGuardar={(v) =>
+            api(`/stock/${pc.variant_id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ stock_ml: v }),
+            }).then(onSaved)
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
 function InsumosTab({ onSaved }: { onSaved: () => void }) {
   const { data, loading, error, reload } = useApi<{ componentes: Componente[] }>(
     "/componentes",
@@ -243,6 +500,10 @@ function InsumosTab({ onSaved }: { onSaved: () => void }) {
 
   return (
     <Card padding={false} className="overflow-hidden">
+      <div className="border-b hairline px-4 py-2.5 text-[11px] text-ink/45">
+        Vista plana de todas las piezas. Las de holders también se editan
+        expandiendo cada producto arriba.
+      </div>
       <div className="grid grid-cols-[2fr_0.7fr_0.7fr] gap-2 border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-ink/45">
         <div>Insumo</div>
         <div className="text-right">Stock</div>
@@ -290,7 +551,13 @@ function InsumosTab({ onSaved }: { onSaved: () => void }) {
   );
 }
 
-function StockFila({ item, onSaved }: { item: StockItem; onSaved: () => void }) {
+function SimpleFila({
+  item,
+  onSaved,
+}: {
+  item: SimpleItem;
+  onSaved: () => void;
+}) {
   const [publicando, setPublicando] = useState(false);
   const desincronizado =
     item.publicado_ml != null && item.publicado_ml !== item.stock_ml;
@@ -366,9 +633,11 @@ function StockFila({ item, onSaved }: { item: StockItem; onSaved: () => void }) 
 
 function NumeroEditable({
   valor,
+  label,
   onGuardar,
 }: {
   valor: number;
+  label?: string;
   onGuardar: (v: number) => Promise<unknown>;
 }) {
   const [editando, setEditando] = useState(false);
@@ -406,7 +675,7 @@ function NumeroEditable({
             setEditando(false);
           }
         }}
-        className="w-full rounded-md border border-accent px-1.5 py-1 text-right text-[13px] font-bold tabular-nums outline-none"
+        className="w-14 rounded-md border border-accent px-1.5 py-1 text-right text-[13px] font-bold tabular-nums outline-none"
       />
     );
   }
@@ -417,7 +686,8 @@ function NumeroEditable({
         setTxt(String(valor));
         setEditando(true);
       }}
-      className="rounded-md px-1.5 py-1 text-right text-[13.5px] font-bold tabular-nums hover:bg-accent-soft"
+      aria-label={label}
+      className="min-w-[2.25rem] rounded-md px-1.5 py-1 text-right text-[13.5px] font-bold tabular-nums hover:bg-accent-soft"
       style={{ opacity: guardando ? 0.5 : 1 }}
     >
       {valor}

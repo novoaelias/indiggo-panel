@@ -317,6 +317,7 @@ function FlexSection() {
 
 interface PlanillaEstado {
   configurado: boolean;
+  suspendido?: boolean;
   sheet_url: string | null;
   escritos_total: number;
   pendientes: number;
@@ -327,6 +328,23 @@ function PlanillaRepartoSection() {
   const { data, loading, reload } = useApi<PlanillaEstado>("/pedidos/planilla");
   const [corriendo, setCorriendo] = useState(false);
   const [msg, setMsg] = useState<string>();
+
+  if (data?.suspendido) {
+    return (
+      <section>
+        <h2 className="mb-3.5 text-[15px] font-semibold">Planilla de reparto</h2>
+        <Card>
+          <p className="max-w-prose text-[13.5px] text-ink/55">
+            Módulo <b>suspendido</b>. Ya no se escribe ningún pedido Flex en la
+            planilla de Google Sheets. Los {data.escritos_total} pedidos que ya
+            se habían cargado siguen en la planilla; nada se borró. Para
+            reactivarlo hay que volver a habilitarlo en el código
+            (<code>SHEETS_SUSPENDIDO</code> en <code>worker/lib/sheets.ts</code>).
+          </p>
+        </Card>
+      </section>
+    );
+  }
 
   async function sincronizar() {
     setCorriendo(true);

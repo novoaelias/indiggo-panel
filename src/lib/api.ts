@@ -12,10 +12,12 @@ export class ApiError extends Error {
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getPanelToken();
+  const esForm = init?.body instanceof FormData;
   const res = await fetch(`/api${path}`, {
     ...init,
     headers: {
-      "content-type": "application/json",
+      // con FormData deja que el browser ponga el boundary
+      ...(esForm ? {} : { "content-type": "application/json" }),
       ...(token ? { "x-panel-token": token } : {}),
       ...(init?.headers ?? {}),
     },

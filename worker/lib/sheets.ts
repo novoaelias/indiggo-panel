@@ -14,7 +14,17 @@ const TOKEN_URI = "https://oauth2.googleapis.com/token";
 const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
 const BLOQUE = 6; // columnas por día (5 + espaciador)
 
+// Módulo SUSPENDIDO (2026-09-03): la logística de reparto de Elias cerró. No se
+// escribe nada más en la planilla. Para reactivarlo: poner esto en false (y, si
+// hace falta, revisar que el Service Account y el SHEETS_ID sigan válidos).
+export const SHEETS_SUSPENDIDO = true;
+
+export function sheetsSuspendido(): boolean {
+  return SHEETS_SUSPENDIDO;
+}
+
 export function sheetsConfigurado(env: Env): boolean {
+  if (SHEETS_SUSPENDIDO) return false;
   return Boolean(
     env.GOOGLE_SA_EMAIL && env.GOOGLE_SA_PRIVATE_KEY && env.SHEETS_ID,
   );

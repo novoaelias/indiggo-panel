@@ -532,15 +532,109 @@ function Field({
   );
 }
 
+interface AtributoCat {
+  id: string;
+  nombre: string;
+  valores: string[];
+}
 interface PropuestaNueva {
   propuesta: {
     titulo: string;
     descripcion: string;
     palabras_clave: string[];
     precio_sugerido: number | null;
+    atributos_sugeridos: Array<{ id?: string; nombre: string; valor: string }>;
   };
   categoria: { id: string; nombre: string } | null;
-  atributos_requeridos: Array<{ id: string; nombre: string }>;
+  atributos_requeridos: AtributoCat[];
+  variacion: { atributos: AtributoCat[]; sugerido_id: string | null } | null;
+}
+
+interface VarianteRow {
+  nombre: string;
+  fotos: string[];
+  stock: string;
+}
+
+const normNombre = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[^a-z]/g, "");
+
+// Sube fotos al bucket "publicaciones" (una por archivo) y devuelve sus URLs.
+function SubirFotos({
+  fotos,
+  onChange,
+  max = 10,
+}: {
+  fotos: string[];
+  onChange: (f: string[]) => void;
+  max?: number;
+}) {
+  const [subiendo, setSubiendo] = useState(false);
+  const [err, setErr] = useState<string>();
+
+  async function agregar(files: FileList | null) {
+    if (!files?.length) return;
+    setErr(undefined);
+    setSubiendo(true);
+    const nuevas: string[] = [];
+    try {
+      for (const file of Array.from(files).slice(0, max - fotos.length)) {
+        const fd = new FormData();
+        fd.append("file", file);
+        const r = await api<{ url: string }>("/ia/imagen", {
+          method: "POST",
+          body: fd,
+        });
+        nuevas.push(r.url);
+      }
+      onChange([...fotos, ...nuevas]);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSubiendo(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2">
+        {fotos.map((url, i) => (
+          <div
+            key={url}
+            className="group relative h-16 w-16 overflow-hidden rounded-lg border border-ink/12"
+          >
+            <img src={url} alt="" className="h-full w-full object-cover" />
+            <button
+              type="button"
+              onClick={() => onChange(fotos.filter((_, j) => j !== i))}
+              className="absolute right-0.5 top-0.5 rounded bg-ink/70 px-1 text-[11px] font-bold text-white opacity-0 group-hover:opacity-100"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        {fotos.length < max && (
+          <label className="flex h-16 w-16 cursor-pointer items-center justify-center rounded-lg border border-dashed border-ink/25 text-[11px] text-ink/45 hover:border-accent hover:text-accent">
+            {subiendo ? "…" : "+ foto"}
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                agregar(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        )}
+      </div>
+      {err && <div className="mt-1 text-[11.5px] text-danger">{err}</div>}
+    </div>
+  );
 }
 
 function NuevaPublicacionModal({
@@ -550,21 +644,33 @@ function NuevaPublicacionModal({
   onClose: () => void;
   onCreada: () => void;
 }) {
-  const [idea, setIdea] = useState("");
+  // paso 1 — entrada
+  const [desc, setDesc] = useState("");
   const [precioObj, setPrecioObj] = useState("");
+  const [fotos, setFotos] = useState<string[]>([]);
+  const [tieneVar, setTieneVar] = useState(false);
+  const [eje, setEje] = useState("");
+  const [vars, setVars] = useState<VarianteRow[]>([
+    { nombre: "", fotos: [], stock: "1" },
+  ]);
+
   const [cargando, setCargando] = useState(false);
   const [err, setErr] = useState<string>();
   const [prop, setProp] = useState<PropuestaNueva>();
 
+  // paso 2 — revisión
   const [titulo, setTitulo] = useState("");
   const [descripcion, setDescripcion] = useState("");
   const [categoriaId, setCategoriaId] = useState("");
   const [precio, setPrecio] = useState("");
   const [stock, setStock] = useState("1");
-  const [fotos, setFotos] = useState("");
   const [attrs, setAttrs] = useState<Record<string, string>>({});
+  const [varAttrId, setVarAttrId] = useState("");
   const [publicando, setPublicando] = useState(false);
-  const [resultado, setResultado] = useState<{ permalink: string | null }>();
+  const [resultado, setResultado] =
+    useState<{ permalink: string | null; avisos: string[] }>();
+
+  const varsListas = vars.filter((v) => v.nombre.trim());
 
   async function generar(e: React.FormEvent) {
     e.preventDefault();
@@ -574,8 +680,16 @@ function NuevaPublicacionModal({
       const r = await api<PropuestaNueva>("/ia/nueva", {
         method: "POST",
         body: JSON.stringify({
-          idea: idea.trim(),
+          descripcion: desc.trim(),
           precio: precioObj ? Number(precioObj) : undefined,
+          imagenes: fotos,
+          variantes:
+            tieneVar && varsListas.length
+              ? {
+                  eje: eje.trim() || "Variante",
+                  valores: varsListas.map((v) => v.nombre.trim()),
+                }
+              : undefined,
         }),
       });
       setProp(r);
@@ -583,6 +697,16 @@ function NuevaPublicacionModal({
       setDescripcion(r.propuesta.descripcion);
       setCategoriaId(r.categoria?.id ?? "");
       setPrecio(String(r.propuesta.precio_sugerido ?? precioObj ?? ""));
+      setVarAttrId(r.variacion?.sugerido_id ?? "");
+      // prefill de atributos requeridos con lo que la IA dedujo
+      const pre: Record<string, string> = {};
+      for (const req of r.atributos_requeridos) {
+        const m = r.propuesta.atributos_sugeridos.find(
+          (s) => normNombre(s.nombre) === normNombre(req.nombre),
+        );
+        if (m) pre[req.id] = m.valor;
+      }
+      setAttrs(pre);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -600,23 +724,39 @@ function NuevaPublicacionModal({
     setPublicando(true);
     setErr(undefined);
     try {
-      const r = await api<{ permalink: string | null }>("/ia/publicar", {
-        method: "POST",
-        body: JSON.stringify({
-          titulo,
-          descripcion,
-          categoria_id: categoriaId,
-          precio: Number(precio),
-          stock: Number(stock) || 1,
-          pictures: fotos
-            .split(/\s+/)
-            .map((s) => s.trim())
-            .filter(Boolean),
-          atributos: Object.entries(attrs)
-            .filter(([, v]) => v.trim())
-            .map(([id, value_name]) => ({ id, value_name })),
-        }),
-      });
+      const conVar = tieneVar && varsListas.length > 0;
+      const ejeNombre =
+        prop?.variacion?.atributos.find((a) => a.id === varAttrId)?.nombre ||
+        eje.trim() ||
+        "Variante";
+      const r = await api<{ permalink: string | null; avisos: string[] }>(
+        "/ia/publicar",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            titulo,
+            descripcion,
+            categoria_id: categoriaId,
+            precio: Number(precio),
+            stock: Number(stock) || 1,
+            imagenes: fotos,
+            atributos: Object.entries(attrs)
+              .filter(([, v]) => v.trim())
+              .map(([id, value_name]) => ({ id, value_name: value_name.trim() })),
+            variantes: conVar
+              ? {
+                  atributo_id: varAttrId || undefined,
+                  atributo_nombre: ejeNombre,
+                  items: varsListas.map((v) => ({
+                    value_name: v.nombre.trim(),
+                    imagenes: v.fotos,
+                    stock: Number(v.stock) || 1,
+                  })),
+                }
+              : undefined,
+          }),
+        },
+      );
       setResultado(r);
       onCreada();
     } catch (e) {
@@ -642,9 +782,16 @@ function NuevaPublicacionModal({
         {resultado ? (
           <div className="flex flex-col gap-3 text-[13.5px]">
             <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
-              Publicación creada <b>en pausa</b>. Revisala y activala en Mercado
-              Libre.
+              Publicación creada <b>en pausa</b>. Revisá fotos, variantes y envío
+              en Mercado Libre y activala desde ahí.
             </div>
+            {resultado.avisos?.length > 0 && (
+              <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
+                {resultado.avisos.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            )}
             {resultado.permalink && (
               <a
                 href={resultado.permalink}
@@ -658,20 +805,28 @@ function NuevaPublicacionModal({
             <PrimaryButton onClick={onClose}>Cerrar</PrimaryButton>
           </div>
         ) : !prop ? (
-          <form onSubmit={generar} className="flex flex-col gap-3">
+          <form onSubmit={generar} className="flex flex-col gap-4">
             <label className="flex flex-col gap-1.5">
               <span className="text-[12.5px] text-ink/50">
-                ¿Qué querés vender?
+                ¿Qué es el producto?
               </span>
               <textarea
                 autoFocus
-                value={idea}
-                onChange={(e) => setIdea(e.target.value)}
+                value={desc}
+                onChange={(e) => setDesc(e.target.value)}
                 rows={3}
-                placeholder="ej: llavero 3D con el logo de NewJeans, PLA, 5cm"
+                placeholder="ej: llavero 3D con el logo de NewJeans, PLA, 5 cm, varios colores"
                 className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
               />
             </label>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[12.5px] text-ink/50">
+                Fotos del producto
+              </span>
+              <SubirFotos fotos={fotos} onChange={setFotos} max={10} />
+            </div>
+
             <label className="flex flex-col gap-1.5">
               <span className="text-[12.5px] text-ink/50">
                 Precio objetivo (opcional)
@@ -683,6 +838,95 @@ function NuevaPublicacionModal({
                 className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
               />
             </label>
+
+            <label className="flex items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                checked={tieneVar}
+                onChange={(e) => setTieneVar(e.target.checked)}
+              />
+              <span>La publicación tiene variantes</span>
+            </label>
+
+            {tieneVar && (
+              <div className="flex flex-col gap-3 rounded-lg border border-ink/10 p-3">
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-[12.5px] text-ink/50">
+                    ¿Por qué varían? (eje)
+                  </span>
+                  <input
+                    value={eje}
+                    onChange={(e) => setEje(e.target.value)}
+                    placeholder="ej: Personaje, Color, Modelo"
+                    className="rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
+                  />
+                </label>
+                {vars.map((v, i) => (
+                  <div
+                    key={i}
+                    className="flex flex-col gap-2 border-t hairline pt-3 first:border-t-0 first:pt-0"
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={v.nombre}
+                        onChange={(e) =>
+                          setVars((s) =>
+                            s.map((x, j) =>
+                              j === i ? { ...x, nombre: e.target.value } : x,
+                            ),
+                          )
+                        }
+                        placeholder={`Variante ${i + 1} (ej: Jimin)`}
+                        className="min-w-0 flex-1 rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
+                      />
+                      <input
+                        value={v.stock}
+                        onChange={(e) =>
+                          setVars((s) =>
+                            s.map((x, j) =>
+                              j === i ? { ...x, stock: e.target.value } : x,
+                            ),
+                          )
+                        }
+                        inputMode="numeric"
+                        className="w-16 rounded-lg border border-ink/12 px-2 py-2 text-center text-[13px] outline-none focus:border-accent"
+                        title="Stock"
+                      />
+                      {vars.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setVars((s) => s.filter((_, j) => j !== i))
+                          }
+                          className="text-[16px] font-bold text-ink/35 hover:text-danger"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                    <SubirFotos
+                      fotos={v.fotos}
+                      onChange={(f) =>
+                        setVars((s) =>
+                          s.map((x, j) => (j === i ? { ...x, fotos: f } : x)),
+                        )
+                      }
+                      max={6}
+                    />
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setVars((s) => [...s, { nombre: "", fotos: [], stock: "1" }])
+                  }
+                  className="self-start text-[12.5px] font-semibold text-accent hover:text-accent-hover"
+                >
+                  + agregar variante
+                </button>
+              </div>
+            )}
+
             {err && <div className="text-[12.5px] text-danger">{err}</div>}
             <PrimaryButton>
               {cargando ? "Generando…" : "Generar propuesta"}
@@ -724,24 +968,70 @@ function NuevaPublicacionModal({
                   className="w-full bg-transparent outline-none"
                 />
               </Field>
-              <Field label="Stock inicial">
-                <input
-                  value={stock}
-                  onChange={(e) => setStock(e.target.value)}
-                  inputMode="numeric"
-                  className="w-full bg-transparent outline-none"
-                />
-              </Field>
+              {(!tieneVar || varsListas.length === 0) && (
+                <Field label="Stock inicial">
+                  <input
+                    value={stock}
+                    onChange={(e) => setStock(e.target.value)}
+                    inputMode="numeric"
+                    className="w-full bg-transparent outline-none"
+                  />
+                </Field>
+              )}
             </div>
-            <Field label="URLs de fotos (una por línea)">
-              <textarea
-                value={fotos}
-                onChange={(e) => setFotos(e.target.value)}
-                rows={2}
-                placeholder="https://…"
-                className="w-full resize-y bg-transparent outline-none"
-              />
-            </Field>
+
+            {tieneVar && varsListas.length > 0 && (
+              <div className="rounded-lg border border-ink/10 p-3">
+                <div className="mb-2 text-[12.5px] text-ink/50">
+                  Variantes ({varsListas.length}) · precio y stock por fila
+                </div>
+                {prop.variacion && prop.variacion.atributos.length > 0 && (
+                  <label className="mb-3 flex flex-col gap-1">
+                    <span className="text-[12px] text-ink/50">
+                      Atributo de Mercado Libre para el eje
+                    </span>
+                    <select
+                      value={varAttrId}
+                      onChange={(e) => setVarAttrId(e.target.value)}
+                      className="rounded-lg border border-ink/12 px-2 py-1.5 text-[12.5px] outline-none focus:border-accent"
+                    >
+                      <option value="">Texto libre ({eje || "Variante"})</option>
+                      {prop.variacion.atributos.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.nombre}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <div className="flex flex-col gap-2">
+                  {varsListas.map((v) => {
+                    const idx = vars.indexOf(v);
+                    return (
+                      <div key={idx} className="flex items-center gap-2 text-[13px]">
+                        <span className="min-w-0 flex-1 truncate">{v.nombre}</span>
+                        <span className="text-[11.5px] text-ink/40">
+                          {v.fotos.length} foto{v.fotos.length === 1 ? "" : "s"}
+                        </span>
+                        <input
+                          value={v.stock}
+                          onChange={(e) =>
+                            setVars((s) =>
+                              s.map((x, j) =>
+                                j === idx ? { ...x, stock: e.target.value } : x,
+                              ),
+                            )
+                          }
+                          inputMode="numeric"
+                          className="w-16 rounded-md border border-ink/12 px-2 py-1 text-center outline-none focus:border-accent"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {prop.atributos_requeridos.length > 0 && (
               <div>
                 <div className="mb-1.5 text-[12.5px] text-ink/50">
@@ -755,8 +1045,16 @@ function NuevaPublicacionModal({
                         onChange={(e) =>
                           setAttrs((s) => ({ ...s, [a.id]: e.target.value }))
                         }
+                        list={`nv-${a.id}`}
                         className="w-full bg-transparent outline-none"
                       />
+                      {a.valores.length > 0 && (
+                        <datalist id={`nv-${a.id}`}>
+                          {a.valores.map((v) => (
+                            <option key={v} value={v} />
+                          ))}
+                        </datalist>
+                      )}
                     </Field>
                   ))}
                 </div>

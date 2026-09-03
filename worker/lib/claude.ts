@@ -6,9 +6,30 @@ const API = "https://api.anthropic.com/v1/messages";
 
 export type ClaudeModel = "claude-sonnet-5" | "claude-haiku-4-5";
 
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "url"; url: string } };
+
 interface ClaudeMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | ContentBlock[];
+}
+
+/**
+ * Arma un mensaje de usuario con texto + imágenes (por URL pública). Las URLs
+ * las descarga Anthropic; tienen que ser accesibles sin auth (Storage público).
+ */
+export function mensajeConImagenes(
+  texto: string,
+  urls: string[],
+): ClaudeMessage {
+  const imgs = urls
+    .filter(Boolean)
+    .slice(0, 16)
+    .map(
+      (url): ContentBlock => ({ type: "image", source: { type: "url", url } }),
+    );
+  return { role: "user", content: [...imgs, { type: "text", text: texto }] };
 }
 
 interface ClaudeOpts {

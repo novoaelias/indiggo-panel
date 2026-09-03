@@ -4,7 +4,7 @@ import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
 import { descontarPorDespacho, syncEnvio, syncOneItem } from "../lib/sync";
-import { sheetsConfigurado } from "../lib/sheets";
+import { sheetsConfigurado, sheetsSuspendido } from "../lib/sheets";
 import { esVariantePieza, planificar, ventasRecientes } from "../lib/bom";
 import { recalcularDerivado } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
@@ -815,6 +815,7 @@ panel.get("/pedidos/planilla", async (c) => {
 
   return c.json({
     configurado: sheetsConfigurado(c.env),
+    suspendido: sheetsSuspendido(),
     sheet_id: c.env.SHEETS_ID ?? null,
     sheet_url: c.env.SHEETS_ID
       ? `https://docs.google.com/spreadsheets/d/${c.env.SHEETS_ID}/edit`
@@ -829,6 +830,11 @@ panel.get("/pedidos/planilla", async (c) => {
 // (ej. si Sheets estuvo caído). Cada uno va al bloque de su día de reparto.
 panel.post("/pedidos/planilla/sync", async (c) => {
   const db = supa(c.env);
+  if (sheetsSuspendido())
+    return c.json(
+      { error: "El módulo de planilla de reparto está suspendido." },
+      409,
+    );
   if (!sheetsConfigurado(c.env))
     return c.json(
       { error: "Falta el Service Account de Google (GOOGLE_SA_EMAIL / GOOGLE_SA_PRIVATE_KEY)." },

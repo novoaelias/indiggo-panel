@@ -19,3 +19,22 @@ export function inicioDiaAR(d: Date = new Date()): string {
 export function inicioDiaARHace(n: number, d: Date = new Date()): string {
   return inicioDiaAR(new Date(d.getTime() - n * 864e5));
 }
+
+/**
+ * Hora de corte del reparto Flex: lo que se vende a partir de las 10:00 AR va a
+ * la lista del día siguiente (el reparto de cada día se arma temprano).
+ */
+export const CORTE_REPARTO_HORA = 10;
+
+/**
+ * "YYYY-MM-DD" del día de reparto para un pedido: su día AR, o el siguiente si
+ * se pagó a partir de las `corte` horas (10:00 por defecto).
+ */
+export function fechaRepartoAR(
+  iso: string | Date,
+  corte: number = CORTE_REPARTO_HORA,
+): string {
+  const ar = new Date(new Date(iso).getTime() - AR_OFFSET_MS);
+  const d = ar.getUTCHours() >= corte ? new Date(ar.getTime() + 864e5) : ar;
+  return d.toISOString().slice(0, 10);
+}

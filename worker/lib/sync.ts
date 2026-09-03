@@ -9,7 +9,7 @@ import { derivarCatalogo } from "./derivar";
 import { derivarBOM } from "./bom";
 import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
 import { envioTerminado } from "./envios";
-import { hoyAR } from "./fecha";
+import { fechaRepartoAR } from "./fecha";
 
 type DB = SupabaseClient<Database>;
 
@@ -308,9 +308,9 @@ export async function syncEnvio(
   }
 }
 
-// Escribe el pedido Flex en la planilla "INDIGGO" (una sola vez, marcado con
-// ml_orders.sheet_synced_at). Va en el bloque del día en que se registra: la
-// planilla es la lista de reparto de hoy. Si el envío ya salió, no se agrega.
+// Agrega el envío Flex a la planilla "INDIGGO" (una sola vez). El bloque del día
+// sale de fechaRepartoAR: lo vendido a partir de las 10:00 AR va al día siguiente.
+// Un mismo envío (pack con varios pedidos) = una sola fila. Si ya salió, no se agrega.
 async function registrarEnvioFlex(
   env: Env,
   db: DB,
@@ -322,10 +322,32 @@ async function registrarEnvioFlex(
 
   const { data: row } = await db
     .from("ml_orders")
-    .select("sheet_synced_at")
+    .select("sheet_synced_at, fecha, raw")
     .eq("id", orderId)
     .maybeSingle();
   if (!row || (row as { sheet_synced_at?: string }).sheet_synced_at) return;
+
+  const envioId = String(s.id);
+  const marcarEnvio = () =>
+    db
+      .from("ml_orders")
+      .update({
+        sheet_synced_at: new Date().toISOString(),
+      } as Database["public"]["Tables"]["ml_orders"]["Update"])
+      .filter("raw->shipping->>id", "eq", envioId);
+
+  // ¿Otro pedido del mismo envío ya está en la planilla? Entonces solo marcar.
+  const { data: hermano } = await db
+    .from("ml_orders")
+    .select("id")
+    .filter("raw->shipping->>id", "eq", envioId)
+    .not("sheet_synced_at", "is", null)
+    .limit(1)
+    .maybeSingle();
+  if (hermano) {
+    await marcarEnvio();
+    return;
+  }
 
   const a = s.receiver_address ?? {};
   const direccion = (
@@ -345,15 +367,10 @@ async function registrarEnvioFlex(
   await appendEnvioFlex(env, {
     direccion: direccion || "",
     localidad: localidad || "",
-    fechaAR: hoyAR(),
+    fechaAR: fechaRepartoAR((row as { fecha: string }).fecha),
   });
 
-  await db
-    .from("ml_orders")
-    .update({
-      sheet_synced_at: new Date().toISOString(),
-    } as Database["public"]["Tables"]["ml_orders"]["Update"])
-    .eq("id", orderId);
+  await marcarEnvio();
 }
 
 /** Sincroniza un solo pedido (usado por el webhook de notificaciones). */

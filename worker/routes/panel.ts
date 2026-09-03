@@ -986,7 +986,7 @@ panel.get("/pedidos-activos", async (c) => {
 // --- Planilla de reparto (Google Sheets): pedidos Flex → filas por día ---
 panel.get("/pedidos/planilla", async (c) => {
   const db = supa(c.env);
-  const desde = inicioDiaAR();
+  const desde = inicioDiaARHace(2);
 
   const [{ count: escritos }, { data: pend }, { data: ult }] = await Promise.all([
     db
@@ -1021,8 +1021,8 @@ panel.get("/pedidos/planilla", async (c) => {
   });
 });
 
-// Rellena la planilla con los pedidos Flex de HOY que todavía no se escribieron
-// (ej. si Sheets estuvo caído, o para forzar la carga del día).
+// Rellena la planilla con los pedidos Flex recientes que todavía no se escribieron
+// (ej. si Sheets estuvo caído). Cada uno va al bloque de su día de reparto.
 panel.post("/pedidos/planilla/sync", async (c) => {
   const db = supa(c.env);
   if (!sheetsConfigurado(c.env))
@@ -1036,7 +1036,7 @@ panel.post("/pedidos/planilla/sync", async (c) => {
     .select("id, ml_order_id, raw, sheet_synced_at")
     .eq("estado", "paid")
     .is("sheet_synced_at", null)
-    .gte("fecha", inicioDiaAR())
+    .gte("fecha", inicioDiaARHace(2))
     .order("fecha", { ascending: true });
 
   let escritos = 0;

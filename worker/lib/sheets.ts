@@ -7,6 +7,7 @@
 // Día 1 en la col A, día 2 en la G, día N en la columna 1 + 6·(N-1).
 // Cada envío Flex del día es una fila nueva; CHICO/MEDIANO siempre TRUE.
 import type { Env } from "../env";
+import { hoyAR } from "./fecha";
 
 const SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const TOKEN_URI = "https://oauth2.googleapis.com/token";
@@ -184,8 +185,13 @@ export async function appendEnvioFlex(
     if (f.d === dd && f.m === mo) col = c;
   }
 
-  // no existe: crear a la derecha del último bloque con fecha
+  // no existe el bloque del día
   if (col < 0) {
+    // sólo se crea hacia adelante (hoy o futuro): un bloque de un día pasado
+    // iría a la derecha de todo y quedaría fuera de orden.
+    if (e.fechaAR < hoyAR()) {
+      throw new Error(`no hay bloque para ${e.fechaAR} (día pasado)`);
+    }
     col = ultimo + BLOQUE;
     await apiPut(
       env,

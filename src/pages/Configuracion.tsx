@@ -371,7 +371,9 @@ function PlanillaRepartoSection() {
               ) : (
                 <b>INDIGGO</b>
               )}{" "}
-              (bloque del día: dirección, localidad y CHICO/MEDIANO tildado).
+              (dirección, localidad y CHICO/MEDIANO tildado). Lo que se vende{" "}
+              <b>a partir de las 10:00</b> va al bloque del día siguiente. Los
+              pedidos de un mismo envío se cargan en una sola fila.
             </p>
 
             {!data.configurado && (
@@ -407,7 +409,7 @@ function PlanillaRepartoSection() {
               >
                 {corriendo
                   ? "Sincronizando…"
-                  : "Sincronizar pedidos Flex de hoy"}
+                  : "Sincronizar pedidos Flex recientes"}
               </button>
             </div>
           </div>

@@ -6,6 +6,7 @@ import { contenido } from "./contenido";
 import { ia } from "./ia";
 import { ml } from "./ml";
 import { panel } from "./panel";
+import { seo } from "./seo";
 
 export const api = new Hono<{ Bindings: Env }>();
 
@@ -60,6 +61,7 @@ api.route("/catalogo", catalogo);
 api.route("/contenido", contenido);
 api.route("/ml", ml);
 api.route("/ia", ia);
+api.route("/seo", seo);
 api.route("/", panel);
 
 api.all("*", (c) => c.json({ error: "not_found" }, 404));

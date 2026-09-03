@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, EmptyHint, PageHeader } from "@/components/ui";
+import { Card, EmptyHint, PageHeader, cx } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
 
 interface Pieza {
@@ -18,9 +18,32 @@ interface Producto {
   nombre: string;
 }
 
+interface Generacion {
+  id: string;
+  tipo: string;
+  modelo: string;
+  costo_usd: number;
+  prompt: string | null;
+  media_url: string | null;
+  ok: boolean;
+  producto: string | null;
+  created_at: string;
+}
+interface Gastos {
+  total_usd: number;
+  imagenes: number;
+  videos: number;
+  por_modelo: Array<{ modelo: string; n: number; usd: number }>;
+  generaciones: Generacion[];
+  storage_dashboard: string;
+}
+
+const usd = (n: number) => `US$ ${n.toFixed(n < 0.1 ? 4 : 2)}`;
+
 export function Contenido() {
   const piezas = useApi<{ piezas: Pieza[] }>("/contenido");
   const productos = useApi<{ productos: Producto[] }>("/catalogo/productos");
+  const gastos = useApi<Gastos>("/contenido/gastos");
   const [abierto, setAbierto] = useState(false);
 
   return (
@@ -45,9 +68,12 @@ export function Contenido() {
           onListo={() => {
             setAbierto(false);
             piezas.reload();
+            gastos.reload();
           }}
         />
       )}
+
+      {gastos.data && <GastoIA g={gastos.data} />}
 
       {piezas.loading && <EmptyHint>Cargando…</EmptyHint>}
       {piezas.error && <EmptyHint>No se pudo cargar: {piezas.error}</EmptyHint>}
@@ -63,12 +89,93 @@ export function Contenido() {
             <PiezaCard
               key={p.id}
               pieza={p}
-              onCambio={() => piezas.reload()}
+              onCambio={() => {
+                piezas.reload();
+                gastos.reload();
+              }}
             />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function GastoIA({ g }: { g: Gastos }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card padding={false} className="mb-6 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-ink/[0.02]"
+      >
+        <span className={cx("text-ink/35 transition-transform", open && "rotate-90")}>
+          ▸
+        </span>
+        <span className="flex-1">
+          <span className="text-[13.5px] font-semibold">Gasto en IA</span>
+          <span className="block text-[11px] text-ink/40">
+            {g.imagenes} imágenes · {g.videos} videos · estimado (la verdad está en kie.ai)
+          </span>
+        </span>
+        <span className="text-[15px] font-bold tabular-nums">{usd(g.total_usd)}</span>
+      </button>
+      {open && (
+        <div className="border-t hairline">
+          <div className="flex flex-wrap gap-x-6 gap-y-1 px-4 py-3 text-[12px]">
+            {g.por_modelo.map((m) => (
+              <span key={m.modelo} className="text-ink/60">
+                <b className="text-ink/80">{m.modelo}</b> · {m.n} · {usd(m.usd)}
+              </span>
+            ))}
+          </div>
+          <a
+            href={g.storage_dashboard}
+            target="_blank"
+            rel="noreferrer"
+            className="block border-t hairline px-4 py-2 text-[12px] font-semibold text-accent hover:text-accent-hover"
+          >
+            Ver todos los archivos en Supabase Storage →
+          </a>
+          <div className="max-h-80 overflow-y-auto border-t hairline">
+            {g.generaciones.map((x) => (
+              <div
+                key={x.id}
+                className="flex items-center gap-3 border-b hairline px-4 py-2 last:border-b-0 text-[12px]"
+              >
+                {x.media_url ? (
+                  <a href={x.media_url} target="_blank" rel="noreferrer">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded bg-ink/[0.06] text-[14px]">
+                      {x.tipo === "video" ? "▶" : "🖼"}
+                    </span>
+                  </a>
+                ) : (
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded bg-ink/[0.06] text-[11px] text-ink/40">
+                    {x.ok ? "…" : "✕"}
+                  </span>
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-ink/70">
+                    {x.producto ?? "genérico"} · {x.modelo}
+                  </span>
+                  <span className="block text-[10.5px] text-ink/35">
+                    {new Date(x.created_at).toLocaleString("es-AR")}
+                  </span>
+                </span>
+                <span className="shrink-0 tabular-nums text-ink/55">
+                  {usd(x.costo_usd)}
+                </span>
+              </div>
+            ))}
+            {g.generaciones.length === 0 && (
+              <div className="px-4 py-4 text-center text-[12px] text-ink/40">
+                Todavía no generaste nada.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

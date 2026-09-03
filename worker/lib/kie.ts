@@ -4,6 +4,22 @@ import type { Env } from "../env";
 
 const BASE = "https://api.kie.ai/api/v1/jobs";
 
+// Costo ESTIMADO por generación, en USD. La verdad está en el dashboard de
+// kie.ai (https://kie.ai) — esto es sólo para tener una referencia en el panel.
+// Ajustado con la pantalla de uso del 2026-08-29 (veo3 ≈ 0.325, nano-banana ≈ 0.02).
+// TUNEABLE.
+export const COSTO_USD: Record<string, number> = {
+  "google/nano-banana": 0.02,
+  "google/nano-banana-edit": 0.02,
+  veo3_fast: 0.35,
+  veo3: 0.45,
+  veo3_lite: 0.2,
+};
+
+export function costoUsd(modelo: string): number {
+  return COSTO_USD[modelo] ?? 0;
+}
+
 interface CreateResp {
   code: number;
   msg?: string;
@@ -31,7 +47,7 @@ export interface ImagenOpts {
 export async function generarImagen(
   env: Env,
   opts: ImagenOpts,
-): Promise<{ url: string; taskId: string }> {
+): Promise<{ url: string; taskId: string; model: string }> {
   const headers = {
     authorization: `Bearer ${env.KIE_API_KEY}`,
     "content-type": "application/json",
@@ -76,7 +92,7 @@ export async function generarImagen(
       };
       const url = parsed.resultUrls?.[0];
       if (!url) throw new Error("kie: success sin resultUrls");
-      return { url, taskId };
+      return { url, taskId, model };
     }
     if (state === "fail") {
       throw new Error(`kie falló: ${rj.data?.failMsg ?? "sin detalle"}`);
@@ -99,7 +115,8 @@ export interface VideoOpts {
 export async function encolarVideo(
   env: Env,
   opts: VideoOpts,
-): Promise<string> {
+): Promise<{ taskId: string; model: string }> {
+  const model = opts.model ?? "veo3_fast";
   const res = await fetch(`${VEO}/generate`, {
     method: "POST",
     headers: {
@@ -108,7 +125,7 @@ export async function encolarVideo(
     },
     body: JSON.stringify({
       prompt: opts.prompt.slice(0, 5000),
-      model: opts.model ?? "veo3_fast",
+      model,
       aspect_ratio: opts.aspectRatio ?? "9:16",
       ...(opts.imageUrls?.length ? { imageUrls: opts.imageUrls.slice(0, 2) } : {}),
       resolution: "1080p",
@@ -122,7 +139,7 @@ export async function encolarVideo(
   if (!res.ok || !j.data?.taskId) {
     throw new Error(`kie veo generate: ${j.msg ?? res.status}`);
   }
-  return j.data.taskId;
+  return { taskId: j.data.taskId, model };
 }
 
 export type EstadoVideo =

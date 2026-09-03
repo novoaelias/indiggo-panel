@@ -262,6 +262,19 @@ async function procesarNotif(
     case "marketplace_orders":
       await syncOneOrder(env, db, id);
       break;
+    case "shipments": {
+      // cambió el estado de un envío → resincronizar el pedido dueño de ese
+      // shipment (trae estado_envio, y descuenta stock si pasó a despachado).
+      const { data: o } = await db
+        .from("ml_orders")
+        .select("ml_order_id")
+        .filter("raw->shipping->>id", "eq", id)
+        .limit(1)
+        .maybeSingle();
+      const oid = (o as { ml_order_id?: string } | null)?.ml_order_id;
+      if (oid) await syncOneOrder(env, db, oid);
+      break;
+    }
     default:
       console.log(`[ml] notif topic sin manejar: ${n.topic}`);
   }

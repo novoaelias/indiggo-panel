@@ -555,6 +555,7 @@ export type Database = {
           ml_order_id: string
           raw: Json | null
           sheet_synced_at: string | null
+          stock_descontado_at: string | null
           total: number | null
         }
         Insert: {
@@ -570,6 +571,7 @@ export type Database = {
           ml_order_id: string
           raw?: Json | null
           sheet_synced_at?: string | null
+          stock_descontado_at?: string | null
           total?: number | null
         }
         Update: {
@@ -585,6 +587,7 @@ export type Database = {
           ml_order_id?: string
           raw?: Json | null
           sheet_synced_at?: string | null
+          stock_descontado_at?: string | null
           total?: number | null
         }
         Relationships: []

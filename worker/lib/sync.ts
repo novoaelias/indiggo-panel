@@ -10,6 +10,11 @@ import { derivarBOM } from "./bom";
 import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
 import { envioTerminado } from "./envios";
 import { fechaRepartoAR } from "./fecha";
+import {
+  ajustarStockPorPedido,
+  avisarStockManual,
+  recalcularDerivado,
+} from "./stock";
 
 type DB = SupabaseClient<Database>;
 
@@ -306,6 +311,62 @@ export async function syncEnvio(
       console.error("[sheets] flex", (e as Error).message),
     );
   }
+
+  // Al despachar (envío shipped/delivered) se descuenta el stock de la venta,
+  // una sola vez. Full no: ese stock lo tiene ML, no Elias.
+  if (
+    (s.status === "shipped" || s.status === "delivered") &&
+    s.logistic_type !== "fulfillment"
+  ) {
+    await descontarPorDespacho(db, ref.id).catch((e) =>
+      console.error("[stock] despacho", (e as Error).message),
+    );
+  }
+}
+
+async function descontarPorDespacho(db: DB, orderId: string): Promise<void> {
+  const { data: o } = await db
+    .from("ml_orders")
+    .select("stock_descontado_at, comprador")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (!o || (o as { stock_descontado_at?: string }).stock_descontado_at) return;
+
+  const { avisos } = await ajustarStockPorPedido(db, orderId, -1);
+  await db
+    .from("ml_orders")
+    .update({
+      stock_descontado_at: new Date().toISOString(),
+    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .eq("id", orderId);
+  await avisarStockManual(
+    db,
+    orderId,
+    (o as { comprador?: string | null }).comprador ?? null,
+    avisos,
+  );
+}
+
+/** Si un pedido ya despachado se cancela, se devuelve el stock. */
+async function restaurarSiCancelado(
+  db: DB,
+  orderId: string,
+  estado: string,
+): Promise<void> {
+  if (estado !== "cancelled") return;
+  const { data: o } = await db
+    .from("ml_orders")
+    .select("stock_descontado_at")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (!o || !(o as { stock_descontado_at?: string }).stock_descontado_at) return;
+  await ajustarStockPorPedido(db, orderId, 1);
+  await db
+    .from("ml_orders")
+    .update({
+      stock_descontado_at: null,
+    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .eq("id", orderId);
 }
 
 // Agrega el envío Flex a la planilla "INDIGGO" (una sola vez). El bloque del día
@@ -384,6 +445,8 @@ export async function syncOneOrder(
   const o = (await res.json()) as MlOrder;
   const { id, shippingId } = await upsertOrder(db, o);
   await syncEnvio(env, db, { id, shippingId, status: o.status }).catch(() => {});
+  await restaurarSiCancelado(db, id, o.status).catch(() => {});
+  await recalcularDerivado(db).catch(() => {});
 }
 
 async function syncPedidos(
@@ -422,6 +485,8 @@ async function syncPedidos(
         const entregado = (o.tags ?? []).includes("delivered");
         if (o.status === "paid" && shippingId && !entregado)
           activos.push({ id, shippingId, status: o.status });
+        else if (o.status === "cancelled")
+          await restaurarSiCancelado(db, id, o.status).catch(() => {});
       } catch (e) {
         errores.push((e as Error).message);
       }
@@ -483,6 +548,10 @@ export async function syncAll(env: Env, db: DB): Promise<SyncResult> {
     await derivarCatalogo(db);
     await derivarBOM(db);
   });
+
+  // Stock derivado (vendible de holders, buffer de ML, mínimos por ventas) +
+  // los descuentos por despacho que hayan quedado marcados en syncEnvio.
+  await seguro(errores, "stock", () => recalcularDerivado(db));
 
   await regenerarAlertas(db).catch((e) =>
     errores.push(`alertas: ${(e as Error).message}`),

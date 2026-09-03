@@ -5,14 +5,12 @@ import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
 import { syncEnvio, syncOneItem } from "../lib/sync";
 import { sheetsConfigurado } from "../lib/sheets";
+import { esVariantePieza, planificar, ventasRecientes } from "../lib/bom";
 import {
-  calcBuffer,
-  calcMinimo,
-  esVariantePieza,
-  planificar,
-  ventasMulti,
-  ventasRecientes,
-} from "../lib/bom";
+  ajustarStockPorPedido,
+  avisarStockManual,
+  recalcularDerivado,
+} from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
 import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
 import { etiquetaLogistica, pedidoActivo } from "../lib/envios";
@@ -146,196 +144,6 @@ panel.get("/metricas", async (c) => {
 });
 
 // --- Stock y producción ---
-
-// Recalcula todo lo derivado:
-//  1. product_variants.stock_real de los holders = mín sobre el BOM (Elias carga
-//     las piezas, no el "vendible"). Las variantes "random/elección" se topean
-//     por el total de photocards del producto.
-//  2. product_variants.stock_ml (buffer publicado en ML) = calcBuffer(stock_real),
-//     para TODAS las variantes. El buffer nunca se edita a mano.
-async function recalcularDerivado(db: ReturnType<typeof supa>) {
-  const { data: vc } = await db
-    .from("variant_components")
-    .select("variant_id, component_id, cantidad");
-
-  if (vc?.length) {
-    const { data: comps } = await db
-      .from("components")
-      .select("id, stock_real, origen");
-    const stockComp = new Map((comps ?? []).map((x) => [x.id, x.stock_real]));
-    const origenComp = new Map((comps ?? []).map((x) => [x.id, x.origen]));
-    const porVar = new Map<
-      string,
-      Array<{ component_id: string; cantidad: number }>
-    >();
-    for (const r of vc) {
-      if (!porVar.has(r.variant_id)) porVar.set(r.variant_id, []);
-      porVar.get(r.variant_id)!.push(r);
-    }
-    const { data: vars } = await db
-      .from("product_variants")
-      .select("id, stock_real, product_id")
-      .in("id", [...porVar.keys()]);
-    const { data: prods } = await db
-      .from("products")
-      .select("id, variantes_por_integrante");
-    const esHolderProd = new Map(
-      (prods ?? []).map((p) => [p.id, p.variantes_por_integrante]),
-    );
-
-    const pcCompsPorProd = new Map<string, Set<string>>();
-    for (const v of vars ?? []) {
-      for (const l of porVar.get(v.id) ?? []) {
-        if (origenComp.get(l.component_id) !== "imprenta") continue;
-        if (!pcCompsPorProd.has(v.product_id))
-          pcCompsPorProd.set(v.product_id, new Set());
-        pcCompsPorProd.get(v.product_id)!.add(l.component_id);
-      }
-    }
-    const totalPcPorProd = new Map<string, number>();
-    for (const [pid, set] of pcCompsPorProd) {
-      let s = 0;
-      for (const cid of set) s += stockComp.get(cid) ?? 0;
-      totalPcPorProd.set(pid, s);
-    }
-
-    for (const v of vars ?? []) {
-      const lines = porVar.get(v.id)!;
-      // "producto = pieza" (ej. llavero suelto): stock = el de la pieza, se
-      // carga una sola vez en la pieza.
-      if (!esHolderProd.get(v.product_id)) {
-        if (esVariantePieza(lines)) {
-          const real = stockComp.get(lines[0].component_id) ?? 0;
-          if (real !== v.stock_real)
-            await db
-              .from("product_variants")
-              .update({ stock_real: real })
-              .eq("id", v.id);
-        }
-        // los packs de mostacillas tienen BOM pero su stock (packs ya armados)
-        // lo lleva Elias a mano; el BOM sólo alimenta el planificador.
-        continue;
-      }
-      let real = Math.min(
-        ...lines.map((l) =>
-          Math.floor((stockComp.get(l.component_id) ?? 0) / (l.cantidad || 1)),
-        ),
-      );
-      const tienePc = lines.some(
-        (l) => origenComp.get(l.component_id) === "imprenta",
-      );
-      if (esHolderProd.get(v.product_id) && !tienePc)
-        real = Math.min(real, totalPcPorProd.get(v.product_id) ?? 0);
-      if (real !== v.stock_real)
-        await db
-          .from("product_variants")
-          .update({ stock_real: real })
-          .eq("id", v.id);
-    }
-  }
-
-  const [{ data: allVars }, { data: prodsPI }, ventas] = await Promise.all([
-    db
-      .from("product_variants")
-      .select(
-        "id, stock_real, stock_ml, stock_minimo, product_id, group_member_id, etiqueta, es_eleccion",
-      )
-      .eq("activo", true),
-    db.from("products").select("id, variantes_por_integrante"),
-    ventasMulti(db, [7, 30]),
-  ]);
-  const esHolder = new Map(
-    (prodsPI ?? []).map((p) => [p.id, p.variantes_por_integrante]),
-  );
-  const v7 = ventas.get(7)!;
-  const v30 = ventas.get(30)!;
-
-  const bomLinesVar = new Map<string, Array<{ component_id: string; cantidad: number }>>();
-  for (const r of vc ?? []) {
-    if (!bomLinesVar.has(r.variant_id)) bomLinesVar.set(r.variant_id, []);
-    bomLinesVar.get(r.variant_id)!.push(r);
-  }
-  // "producto = pieza": su stock/mínimo lo lleva la pieza, no la variante.
-  const esPieza = (vid: string, pid: string) =>
-    !esHolder.get(pid) && esVariantePieza(bomLinesVar.get(vid));
-
-  // "Qué se puede vender" de las variantes reales (no elección) de cada producto
-  // simple → de ahí sale el stock que se le muestra a la variante "Random".
-  const realPorProd = new Map<string, number>();
-  for (const v of allVars ?? []) {
-    if (v.es_eleccion || esHolder.get(v.product_id)) continue;
-    realPorProd.set(
-      v.product_id,
-      (realPorProd.get(v.product_id) ?? 0) + Math.max(0, v.stock_real),
-    );
-  }
-
-  const minimoVar = new Map<string, number>();
-  for (const v of allVars ?? []) {
-    const patch: Record<string, number> = {};
-
-    // stock_real de la variante "Random" de un producto simple = suma de las
-    // reales (no se edita a mano; los holders siguen su propio camino).
-    const realEfectivo =
-      v.es_eleccion && !esHolder.get(v.product_id)
-        ? (realPorProd.get(v.product_id) ?? 0)
-        : v.stock_real;
-    if (v.es_eleccion && !esHolder.get(v.product_id) && realEfectivo !== v.stock_real)
-      patch.stock_real = realEfectivo;
-
-    // mínimo automático por ventas (las de elección no tienen mínimo propio).
-    if (!v.es_eleccion) {
-      const min = calcMinimo(
-        v7.porVariante.get(v.id) ?? 0,
-        v30.porVariante.get(v.id) ?? 0,
-        v30.porProducto.get(v.product_id) ?? 0,
-      );
-      minimoVar.set(v.id, min);
-      // Se persiste sólo en variantes de productos simples "de verdad". En
-      // holders y en "producto = pieza" el mínimo lo lleva la pieza (ver abajo).
-      if (
-        !esHolder.get(v.product_id) &&
-        !esPieza(v.id, v.product_id) &&
-        min !== v.stock_minimo
-      )
-        patch.stock_minimo = min;
-    }
-
-    // buffer publicado en ML
-    const buf = calcBuffer(realEfectivo);
-    if (buf !== v.stock_ml) patch.stock_ml = buf;
-
-    if (Object.keys(patch).length)
-      await db
-        .from("product_variants")
-        .update(patch as Database["public"]["Tables"]["product_variants"]["Update"])
-        .eq("id", v.id);
-  }
-
-  // mínimo de las piezas (cuerpos / llaveros / photocards) = demanda mínima que
-  // arrastran las variantes que las consumen SIN armado (holders + "producto =
-  // pieza"). Las piezas de packs (logos, letras, nombres) NO llevan mínimo:
-  // Elias las imprime por pedido — el planificador ya calcula cuánto hace falta.
-  const prodDeVar = new Map((allVars ?? []).map((v) => [v.id, v.product_id]));
-  const arrastraMinimo = (vid: string) => {
-    const pid = prodDeVar.get(vid);
-    return !!pid && (esHolder.get(pid) || esPieza(vid, pid));
-  };
-  const { data: compsMin } = await db
-    .from("components")
-    .select("id, stock_minimo");
-  const minimoComp = new Map<string, number>();
-  for (const r of vc ?? []) {
-    if (!arrastraMinimo(r.variant_id)) continue;
-    const add = (minimoVar.get(r.variant_id) ?? 0) * (r.cantidad || 1);
-    if (add) minimoComp.set(r.component_id, (minimoComp.get(r.component_id) ?? 0) + add);
-  }
-  for (const comp of compsMin ?? []) {
-    const min = minimoComp.get(comp.id) ?? 0;
-    if (min !== comp.stock_minimo)
-      await db.from("components").update({ stock_minimo: min }).eq("id", comp.id);
-  }
-}
 
 // Cantidades publicadas hoy en ML por variante — SÓLO publicaciones activas
 // (las pausadas/finalizadas/en revisión no se pueden actualizar).
@@ -1060,6 +868,32 @@ panel.post("/pedidos/planilla/sync", async (c) => {
     }
   }
   return c.json({ escritos, revisados: orders?.length ?? 0, errores });
+});
+
+// Marcar un pedido como despachado a mano (si ML tarda en actualizar el envío):
+// descuenta el stock de la venta, una sola vez.
+panel.post("/pedidos/:id/despachar", async (c) => {
+  const db = supa(c.env);
+  const id = c.req.param("id");
+  const { data: o } = await db
+    .from("ml_orders")
+    .select("id, comprador, stock_descontado_at")
+    .eq("ml_order_id", id)
+    .maybeSingle();
+  if (!o) return c.json({ error: "pedido no encontrado" }, 404);
+  if (o.stock_descontado_at)
+    return c.json({ ok: true, ya: true, aplicados: 0, avisos: [] });
+
+  const { aplicados, avisos } = await ajustarStockPorPedido(db, o.id, -1);
+  await db
+    .from("ml_orders")
+    .update({
+      stock_descontado_at: new Date().toISOString(),
+    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .eq("id", o.id);
+  await avisarStockManual(db, o.id, o.comprador, avisos);
+  await recalcularDerivado(db);
+  return c.json({ ok: true, aplicados, avisos });
 });
 
 panel.post("/alertas/regenerar", async (c) => {

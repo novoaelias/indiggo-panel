@@ -3,6 +3,13 @@ dist
 .dev.vars
 .prod.vars
 *.vars
+
+# Claves de Service Account de Google (JSON descargado de Google Cloud)
+*-*.iam.gserviceaccount.com.json
+bubbly-realm-*.json
+*service-account*.json
+*service_account*.json
+gcp-*.json
 .wrangler
 *.local
 .DS_Store

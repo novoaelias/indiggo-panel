@@ -14,6 +14,12 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    // Planilla "INDIGGO" de reparto Flex (editable por cualquiera con el link,
+    // no es un secreto). Los secretos del Service Account: GOOGLE_SA_EMAIL /
+    // GOOGLE_SA_PRIVATE_KEY (wrangler secret).
+    "SHEETS_ID": "<id-de-tu-planilla-google-sheets>"
+  },
   "triggers": {
     // ML refresca el access_token cada ~6h (expira en 6h). Corre cada 4h.
     // Sync de la cuenta ML una vez por hora.

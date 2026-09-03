@@ -79,10 +79,12 @@ export type Database = {
           created_at: string
           group_member_id: string | null
           id: string
+          minutos_placa: number | null
           minutos_produccion: number | null
           nombre: string
           notas: string | null
           origen: string
+          rinde_por_placa: number | null
           stock_minimo: number
           stock_real: number
           updated_at: string
@@ -91,10 +93,12 @@ export type Database = {
           created_at?: string
           group_member_id?: string | null
           id?: string
+          minutos_placa?: number | null
           minutos_produccion?: number | null
           nombre: string
           notas?: string | null
           origen?: string
+          rinde_por_placa?: number | null
           stock_minimo?: number
           stock_real?: number
           updated_at?: string
@@ -103,10 +107,12 @@ export type Database = {
           created_at?: string
           group_member_id?: string | null
           id?: string
+          minutos_placa?: number | null
           minutos_produccion?: number | null
           nombre?: string
           notas?: string | null
           origen?: string
+          rinde_por_placa?: number | null
           stock_minimo?: number
           stock_real?: number
           updated_at?: string
@@ -286,6 +292,72 @@ export type Database = {
           },
         ]
       }
+      media_generations: {
+        Row: {
+          content_piece_id: string | null
+          costo_usd: number
+          created_at: string
+          error: string | null
+          id: string
+          media_url: string | null
+          modelo: string
+          ok: boolean
+          product_id: string | null
+          prompt: string | null
+          proveedor: string
+          ref_urls: Json | null
+          storage_path: string | null
+          tipo: string
+        }
+        Insert: {
+          content_piece_id?: string | null
+          costo_usd?: number
+          created_at?: string
+          error?: string | null
+          id?: string
+          media_url?: string | null
+          modelo: string
+          ok?: boolean
+          product_id?: string | null
+          prompt?: string | null
+          proveedor?: string
+          ref_urls?: Json | null
+          storage_path?: string | null
+          tipo: string
+        }
+        Update: {
+          content_piece_id?: string | null
+          costo_usd?: number
+          created_at?: string
+          error?: string | null
+          id?: string
+          media_url?: string | null
+          modelo?: string
+          ok?: boolean
+          product_id?: string | null
+          prompt?: string | null
+          proveedor?: string
+          ref_urls?: Json | null
+          storage_path?: string | null
+          tipo?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "media_generations_content_piece_id_fkey"
+            columns: ["content_piece_id"]
+            isOneToOne: false
+            referencedRelation: "content_pieces"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "media_generations_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       ml_listing_variations: {
         Row: {
           cantidad_ml: number | null
@@ -340,6 +412,8 @@ export type Database = {
       ml_listings: {
         Row: {
           cantidad_ml: number | null
+          categoria_analisis: Json | null
+          categoria_sugerida: string | null
           created_at: string
           estado: string
           grupo_id: string | null
@@ -351,6 +425,7 @@ export type Database = {
           precio: number | null
           product_id: string | null
           raw: Json | null
+          reemplazada_por: string | null
           sincronizado_at: string | null
           thumbnail: string | null
           tiene_variantes: boolean
@@ -359,6 +434,8 @@ export type Database = {
         }
         Insert: {
           cantidad_ml?: number | null
+          categoria_analisis?: Json | null
+          categoria_sugerida?: string | null
           created_at?: string
           estado?: string
           grupo_id?: string | null
@@ -370,6 +447,7 @@ export type Database = {
           precio?: number | null
           product_id?: string | null
           raw?: Json | null
+          reemplazada_por?: string | null
           sincronizado_at?: string | null
           thumbnail?: string | null
           tiene_variantes?: boolean
@@ -378,6 +456,8 @@ export type Database = {
         }
         Update: {
           cantidad_ml?: number | null
+          categoria_analisis?: Json | null
+          categoria_sugerida?: string | null
           created_at?: string
           estado?: string
           grupo_id?: string | null
@@ -389,6 +469,7 @@ export type Database = {
           precio?: number | null
           product_id?: string | null
           raw?: Json | null
+          reemplazada_por?: string | null
           sincronizado_at?: string | null
           thumbnail?: string | null
           tiene_variantes?: boolean
@@ -464,34 +545,46 @@ export type Database = {
         Row: {
           comprador: string | null
           created_at: string
+          envio_substatus: string | null
+          envio_sync_at: string | null
           estado: string | null
           estado_envio: string | null
           fecha: string
           id: string
+          logistic_type: string | null
           ml_order_id: string
           raw: Json | null
+          sheet_synced_at: string | null
           total: number | null
         }
         Insert: {
           comprador?: string | null
           created_at?: string
+          envio_substatus?: string | null
+          envio_sync_at?: string | null
           estado?: string | null
           estado_envio?: string | null
           fecha: string
           id?: string
+          logistic_type?: string | null
           ml_order_id: string
           raw?: Json | null
+          sheet_synced_at?: string | null
           total?: number | null
         }
         Update: {
           comprador?: string | null
           created_at?: string
+          envio_substatus?: string | null
+          envio_sync_at?: string | null
           estado?: string | null
           estado_envio?: string | null
           fecha?: string
           id?: string
+          logistic_type?: string | null
           ml_order_id?: string
           raw?: Json | null
+          sheet_synced_at?: string | null
           total?: number | null
         }
         Relationships: []
@@ -500,6 +593,7 @@ export type Database = {
         Row: {
           activo: boolean
           created_at: string
+          es_eleccion: boolean
           etiqueta: string
           group_member_id: string | null
           id: string
@@ -513,6 +607,7 @@ export type Database = {
         Insert: {
           activo?: boolean
           created_at?: string
+          es_eleccion?: boolean
           etiqueta?: string
           group_member_id?: string | null
           id?: string
@@ -526,6 +621,7 @@ export type Database = {
         Update: {
           activo?: boolean
           created_at?: string
+          es_eleccion?: boolean
           etiqueta?: string
           group_member_id?: string | null
           id?: string
@@ -716,11 +812,125 @@ export type Database = {
   }
 }
 
-type DefaultSchema = Database["public"]
+type DatabaseWithoutInternals = Omit<Database, "__InternalSupabase">
 
-export type Tables<T extends keyof DefaultSchema["Tables"]> =
-  DefaultSchema["Tables"][T]["Row"]
-export type TablesInsert<T extends keyof DefaultSchema["Tables"]> =
-  DefaultSchema["Tables"][T]["Insert"]
-export type TablesUpdate<T extends keyof DefaultSchema["Tables"]> =
-  DefaultSchema["Tables"][T]["Update"]
+type DefaultSchema = DatabaseWithoutInternals[Extract<keyof Database, "public">]
+
+export type Tables<
+  DefaultSchemaTableNameOrOptions extends
+    | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
+        DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
+    : never) = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
+      DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])[TableName] extends {
+      Row: infer R
+    }
+    ? R
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof (DefaultSchema["Tables"] &
+        DefaultSchema["Views"])
+    ? (DefaultSchema["Tables"] &
+        DefaultSchema["Views"])[DefaultSchemaTableNameOrOptions] extends {
+        Row: infer R
+      }
+      ? R
+      : never
+    : never
+
+export type TablesInsert<
+  DefaultSchemaTableNameOrOptions extends
+    | keyof DefaultSchema["Tables"]
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
+    : never) = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"][TableName] extends {
+      Insert: infer I
+    }
+    ? I
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof DefaultSchema["Tables"]
+    ? DefaultSchema["Tables"][DefaultSchemaTableNameOrOptions] extends {
+        Insert: infer I
+      }
+      ? I
+      : never
+    : never
+
+export type TablesUpdate<
+  DefaultSchemaTableNameOrOptions extends
+    | keyof DefaultSchema["Tables"]
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
+    : never) = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"][TableName] extends {
+      Update: infer U
+    }
+    ? U
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof DefaultSchema["Tables"]
+    ? DefaultSchema["Tables"][DefaultSchemaTableNameOrOptions] extends {
+        Update: infer U
+      }
+      ? U
+      : never
+    : never
+
+export type Enums<
+  DefaultSchemaEnumNameOrOptions extends
+    | keyof DefaultSchema["Enums"]
+    | { schema: keyof DatabaseWithoutInternals },
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
+    : never) = never,
+> = DefaultSchemaEnumNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"][EnumName]
+  : DefaultSchemaEnumNameOrOptions extends keyof DefaultSchema["Enums"]
+    ? DefaultSchema["Enums"][DefaultSchemaEnumNameOrOptions]
+    : never
+
+export type CompositeTypes<
+  PublicCompositeTypeNameOrOptions extends
+    | keyof DefaultSchema["CompositeTypes"]
+    | { schema: keyof DatabaseWithoutInternals },
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
+    : never) = never,
+> = PublicCompositeTypeNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"][CompositeTypeName]
+  : PublicCompositeTypeNameOrOptions extends keyof DefaultSchema["CompositeTypes"]
+    ? DefaultSchema["CompositeTypes"][PublicCompositeTypeNameOrOptions]
+    : never
+
+export const Constants = {
+  public: {
+    Enums: {},
+  },
+} as const

@@ -3,14 +3,10 @@ import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
-import { syncEnvio, syncOneItem } from "../lib/sync";
+import { descontarPorDespacho, syncEnvio, syncOneItem } from "../lib/sync";
 import { sheetsConfigurado } from "../lib/sheets";
 import { esVariantePieza, planificar, ventasRecientes } from "../lib/bom";
-import {
-  ajustarStockPorPedido,
-  avisarStockManual,
-  recalcularDerivado,
-} from "../lib/stock";
+import { recalcularDerivado } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
 import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
 import { etiquetaLogistica, pedidoActivo } from "../lib/envios";
@@ -877,21 +873,13 @@ panel.post("/pedidos/:id/despachar", async (c) => {
   const id = c.req.param("id");
   const { data: o } = await db
     .from("ml_orders")
-    .select("id, comprador, stock_descontado_at")
+    .select("id")
     .eq("ml_order_id", id)
     .maybeSingle();
   if (!o) return c.json({ error: "pedido no encontrado" }, 404);
-  if (o.stock_descontado_at)
-    return c.json({ ok: true, ya: true, aplicados: 0, avisos: [] });
 
-  const { aplicados, avisos } = await ajustarStockPorPedido(db, o.id, -1);
-  await db
-    .from("ml_orders")
-    .update({
-      stock_descontado_at: new Date().toISOString(),
-    } as Database["public"]["Tables"]["ml_orders"]["Update"])
-    .eq("id", o.id);
-  await avisarStockManual(db, o.id, o.comprador, avisos);
+  const { ya, aplicados, avisos } = await descontarPorDespacho(db, o.id);
+  if (ya) return c.json({ ok: true, ya: true, aplicados: 0, avisos: [] });
   await recalcularDerivado(db);
   return c.json({ ok: true, aplicados, avisos });
 });

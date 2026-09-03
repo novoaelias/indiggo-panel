@@ -324,27 +324,58 @@ export async function syncEnvio(
   }
 }
 
-async function descontarPorDespacho(db: DB, orderId: string): Promise<void> {
+/**
+ * Descuenta el stock de una venta al despachar, **una sola vez**. Sirve tanto al
+ * sync automático (webhook/cron) como al botón "despachar" del panel.
+ * `ya: true` = otra ejecución ya lo había descontado.
+ */
+export async function descontarPorDespacho(
+  db: DB,
+  orderId: string,
+): Promise<{ ya: boolean; aplicados: number; avisos: string[] }> {
   const { data: o } = await db
     .from("ml_orders")
-    .select("stock_descontado_at, comprador")
+    .select("comprador")
     .eq("id", orderId)
     .maybeSingle();
-  if (!o || (o as { stock_descontado_at?: string }).stock_descontado_at) return;
+  if (!o) return { ya: true, aplicados: 0, avisos: [] };
 
-  const { avisos } = await ajustarStockPorPedido(db, orderId, -1);
-  await db
+  // Claim atómico: ML manda varias notificaciones de "shipped", el cron corre en
+  // paralelo y Elias puede tocar "despachar" a mano al mismo tiempo. El
+  // UPDATE ... WHERE stock_descontado_at IS NULL lo serializa Postgres: solo una
+  // ejecución se lleva la fila, las demás salen. Sin esto se descontaba el stock
+  // dos (o más) veces por la misma venta.
+  const { data: claim } = await db
     .from("ml_orders")
     .update({
       stock_descontado_at: new Date().toISOString(),
     } as Database["public"]["Tables"]["ml_orders"]["Update"])
-    .eq("id", orderId);
+    .eq("id", orderId)
+    .is("stock_descontado_at", null)
+    .select("id");
+  if (!claim || claim.length === 0) return { ya: true, aplicados: 0, avisos: [] };
+
+  let aplicados = 0;
+  let avisos: string[] = [];
+  try {
+    ({ aplicados, avisos } = await ajustarStockPorPedido(db, orderId, -1));
+  } catch (e) {
+    // no se pudo tocar el stock: soltar el claim para reintentar en el próximo sync
+    await db
+      .from("ml_orders")
+      .update({
+        stock_descontado_at: null,
+      } as Database["public"]["Tables"]["ml_orders"]["Update"])
+      .eq("id", orderId);
+    throw e;
+  }
   await avisarStockManual(
     db,
     orderId,
     (o as { comprador?: string | null }).comprador ?? null,
     avisos,
   );
+  return { ya: false, aplicados, avisos };
 }
 
 /** Si un pedido ya despachado se cancela, se devuelve el stock. */
@@ -354,19 +385,31 @@ async function restaurarSiCancelado(
   estado: string,
 ): Promise<void> {
   if (estado !== "cancelled") return;
-  const { data: o } = await db
-    .from("ml_orders")
-    .select("stock_descontado_at")
-    .eq("id", orderId)
-    .maybeSingle();
-  if (!o || !(o as { stock_descontado_at?: string }).stock_descontado_at) return;
-  await ajustarStockPorPedido(db, orderId, 1);
-  await db
+
+  // Claim atómico a la inversa: pasar stock_descontado_at de "no null" a null.
+  // Solo una ejecución se lleva la fila → el stock se devuelve una sola vez.
+  const { data: claim } = await db
     .from("ml_orders")
     .update({
       stock_descontado_at: null,
     } as Database["public"]["Tables"]["ml_orders"]["Update"])
-    .eq("id", orderId);
+    .eq("id", orderId)
+    .not("stock_descontado_at", "is", null)
+    .select("id");
+  if (!claim || claim.length === 0) return;
+
+  try {
+    await ajustarStockPorPedido(db, orderId, 1);
+  } catch (e) {
+    // no se pudo devolver: re-marcar para reintentar en el próximo sync
+    await db
+      .from("ml_orders")
+      .update({
+        stock_descontado_at: new Date().toISOString(),
+      } as Database["public"]["Tables"]["ml_orders"]["Update"])
+      .eq("id", orderId);
+    throw e;
+  }
 }
 
 // Agrega el envío Flex a la planilla "INDIGGO" (una sola vez). El bloque del día
@@ -389,15 +432,9 @@ async function registrarEnvioFlex(
   if (!row || (row as { sheet_synced_at?: string }).sheet_synced_at) return;
 
   const envioId = String(s.id);
-  const marcarEnvio = () =>
-    db
-      .from("ml_orders")
-      .update({
-        sheet_synced_at: new Date().toISOString(),
-      } as Database["public"]["Tables"]["ml_orders"]["Update"])
-      .filter("raw->shipping->>id", "eq", envioId);
 
-  // ¿Otro pedido del mismo envío ya está en la planilla? Entonces solo marcar.
+  // ¿Otro pedido del mismo envío ya está en la planilla? Entonces solo marcar
+  // este pedido (los packs se arman de a un pedido por vez) y no escribir otra fila.
   const { data: hermano } = await db
     .from("ml_orders")
     .select("id")
@@ -406,9 +443,39 @@ async function registrarEnvioFlex(
     .limit(1)
     .maybeSingle();
   if (hermano) {
-    await marcarEnvio();
+    await db
+      .from("ml_orders")
+      .update({
+        sheet_synced_at: new Date().toISOString(),
+      } as Database["public"]["Tables"]["ml_orders"]["Update"])
+      .eq("id", orderId);
     return;
   }
+
+  // Claim atómico: ML manda varias notificaciones por venta (orders, orders_v2,
+  // shipments) y el cron corre en paralelo. Sin esto, dos ejecuciones pasaban el
+  // chequeo de arriba a la vez y escribían la misma dirección dos veces.
+  // El UPDATE ... WHERE sheet_synced_at IS NULL lo serializa Postgres: solo una
+  // ejecución se lleva filas; las demás reciben [] y salen.
+  const marcado = new Date().toISOString();
+  const { data: claim } = await db
+    .from("ml_orders")
+    .update({
+      sheet_synced_at: marcado,
+    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .filter("raw->shipping->>id", "eq", envioId)
+    .is("sheet_synced_at", null)
+    .select("id");
+  const ids = (claim ?? []).map((c) => (c as { id: string }).id);
+  if (ids.length === 0) return; // otra ejecución ya tomó este envío
+
+  const soltarClaim = () =>
+    db
+      .from("ml_orders")
+      .update({
+        sheet_synced_at: null,
+      } as Database["public"]["Tables"]["ml_orders"]["Update"])
+      .in("id", ids);
 
   const a = s.receiver_address ?? {};
   const direccion = (
@@ -422,16 +489,22 @@ async function registrarEnvioFlex(
     a.state?.name ||
     ""
   )?.trim();
-  // sin datos de dirección todavía: se reintenta en el próximo sync
-  if (!direccion && !localidad) return;
+  // sin datos de dirección todavía: se suelta el claim y se reintenta en el próximo sync
+  if (!direccion && !localidad) {
+    await soltarClaim();
+    return;
+  }
 
-  await appendEnvioFlex(env, {
-    direccion: direccion || "",
-    localidad: localidad || "",
-    fechaAR: fechaRepartoAR((row as { fecha: string }).fecha),
-  });
-
-  await marcarEnvio();
+  try {
+    await appendEnvioFlex(env, {
+      direccion: direccion || "",
+      localidad: localidad || "",
+      fechaAR: fechaRepartoAR((row as { fecha: string }).fecha),
+    });
+  } catch (e) {
+    await soltarClaim();
+    throw e;
+  }
 }
 
 /** Sincroniza un solo pedido (usado por el webhook de notificaciones). */

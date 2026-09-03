@@ -6,6 +6,7 @@ import { Gate } from "./components/Gate";
 import { IconMenu } from "./components/icons";
 import { Inicio } from "./pages/Inicio";
 import { Publicaciones } from "./pages/Publicaciones";
+import { Pedidos } from "./pages/Pedidos";
 import { Stock } from "./pages/Stock";
 import { Metricas } from "./pages/Metricas";
 import { Contenido } from "./pages/Contenido";
@@ -48,6 +49,7 @@ function Panel() {
           <Routes>
             <Route path="/" element={<Inicio />} />
             <Route path="/publicaciones" element={<Publicaciones />} />
+            <Route path="/pedidos" element={<Pedidos />} />
             <Route path="/stock" element={<Stock />} />
             <Route path="/metricas" element={<Metricas />} />
             <Route path="/contenido" element={<Contenido />} />

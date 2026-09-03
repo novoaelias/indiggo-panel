@@ -34,6 +34,24 @@ export function IconStock({ className }: P) {
     </svg>
   );
 }
+export function IconPedidos({ className }: P) {
+  return (
+    <svg className={className ?? base} viewBox="0 0 20 20" fill="none">
+      <path
+        d="M2.5 6.5 10 3l7.5 3.5L10 10 2.5 6.5Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M2.5 6.5v7L10 17l7.5-3.5v-7M10 10v7"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 export function IconMetricas({ className }: P) {
   return (
     <svg className={className ?? base} viewBox="0 0 20 20" fill="none">

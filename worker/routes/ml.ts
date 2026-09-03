@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
+import type { Json } from "@/lib/database.types";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import {
@@ -7,6 +8,7 @@ import {
   challengeFor,
   exchangeCode,
   getToken,
+  mlFetch,
   randomVerifier,
   redirectUri,
 } from "../lib/ml";
@@ -120,6 +122,111 @@ ml.post("/sync", async (c) => {
   }
   const res = await syncAll(c.env, db);
   return c.json(res);
+});
+
+// --- Flex: ocultar / mostrar "Envío Flex" como opción en TODAS las publicaciones ---
+// No desactiva Flex en la cuenta; sólo saca/pone el tag `self_service_in` de cada
+// item (que es lo que hace que aparezca como opción de envío para el comprador).
+function shippingTags(raw: unknown): string[] {
+  const t = (raw as { shipping?: { tags?: unknown } } | null)?.shipping?.tags;
+  return Array.isArray(t) ? (t.filter((x) => typeof x === "string") as string[]) : [];
+}
+
+ml.get("/flex", async (c) => {
+  const db = supa(c.env);
+  const { data: listings } = await db
+    .from("ml_listings")
+    .select("raw")
+    .eq("estado", "active");
+  const conFlex = (listings ?? []).filter((l) =>
+    shippingTags(l.raw).includes("self_service_in"),
+  ).length;
+  const meta = ((await getToken(db))?.meta ?? {}) as Record<string, unknown>;
+  return c.json({
+    oculto: meta.flex_oculto === true,
+    desde: (meta.flex_oculto_at as string | null) ?? null,
+    con_flex: conFlex,
+    activas: listings?.length ?? 0,
+  });
+});
+
+ml.post("/flex", async (c) => {
+  const { ocultar } = await c.req.json<{ ocultar?: boolean }>();
+  const db = supa(c.env);
+  if (!(await getToken(db)))
+    return c.json({ error: "MercadoLibre no está conectado" }, 409);
+
+  const { data: listings } = await db
+    .from("ml_listings")
+    .select("ml_item_id, raw")
+    .eq("estado", "active");
+
+  // sólo tocar las que hace falta cambiar
+  const pendientes = (listings ?? []).filter((l) => {
+    const tiene = shippingTags(l.raw).includes("self_service_in");
+    return ocultar ? tiene : !tiene;
+  });
+
+  let ok = 0;
+  let forbidden = 0;
+  const errores: string[] = [];
+  const tocados = new Set<string>();
+  // API de Flex por item: POST = activar, DELETE = desactivar la opción.
+  // /sites/MLA/shipping/selfservice/items/{ITEM_ID}
+  const empujar = async (l: { ml_item_id: string }) => {
+    const r = await mlFetch(
+      c.env,
+      db,
+      `/sites/MLA/shipping/selfservice/items/${l.ml_item_id}`,
+      { method: ocultar ? "DELETE" : "POST" },
+    );
+    if (r.ok || r.status === 204) {
+      ok++;
+      tocados.add(l.ml_item_id);
+    } else if (r.status === 403) {
+      forbidden++;
+    } else {
+      errores.push(`${l.ml_item_id}: ${r.status} ${(await r.text()).slice(0, 120)}`);
+    }
+  };
+
+  const lote = pendientes.slice(0, 200);
+  for (let i = 0; i < lote.length; i += 5)
+    await Promise.all(lote.slice(i, i + 5).map(empujar));
+
+  // ML bloquea la API de Flex si la app no tiene el permiso del producto
+  // "Mercado Envíos Flex" — devolvemos un error claro para el panel.
+  if (forbidden > 0 && ok === 0) {
+    return c.json(
+      {
+        error:
+          "Mercado Libre bloquea este cambio: tu app todavía no tiene habilitada la API de Mercado Envíos Flex. Hay que pedir acceso a ese producto para la app en developers.mercadolibre.com.ar. Mientras tanto, se puede pausar Flex desde el panel de Mercado Envíos Flex de tu cuenta.",
+        codigo: "flex_api_sin_permiso",
+      },
+      403,
+    );
+  }
+
+  for (const it of tocados) {
+    try {
+      await syncOneItem(c.env, db, it);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const row = await getToken(db);
+  const meta = {
+    ...(typeof row?.meta === "object" && row?.meta ? row.meta : {}),
+    flex_oculto: ocultar === true,
+    flex_oculto_at: ocultar ? new Date().toISOString() : null,
+  };
+  await db
+    .from("integrations")
+    .update({ meta: meta as Json })
+    .eq("provider", "mercadolibre");
+
+  return c.json({ tocados: ok, pendientes: pendientes.length, errores });
 });
 
 // Webhook de notificaciones de ML. Debe responder 200 en < 500 ms:

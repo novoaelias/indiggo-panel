@@ -16,6 +16,11 @@ type DB = SupabaseClient<Database>;
 
 const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
+// Variante "sin elección real": el comprador no elige un diseño/integrante
+// concreto, se cumple con cualquiera. No lleva stock ni producción propia.
+// TUNEABLE.
+const ELECCION = /random|elecci[oó]n|sorpresa|surprise|a gusto|no elijo|cualquiera/i;
+
 const CATEGORIAS: Array<[RegExp, string]> = [
   [/\bmostacilla/i, "mostacillas"],
   [/\b(clicker|fidget)/i, "clickers"],
@@ -312,6 +317,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
     sku: string;
     etiqueta: string;
     group_member_id: string | null;
+    es_eleccion: boolean;
     stock_ml_seed: number;
     id?: string; // existente
   }
@@ -348,6 +354,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
           sku,
           etiqueta: "Único",
           group_member_id: null,
+          es_eleccion: false,
           stock_ml_seed: l.cantidad_ml ?? 0,
           id: varBySku.get(sku)?.id,
         });
@@ -360,6 +367,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
         (v.combinacion as Array<{ value_name?: string }> | null)?.[0]
           ?.value_name ?? "Variante";
       const memberId = miembros?.get(norm(valueName)) ?? null;
+      const esEleccion = !memberId && ELECCION.test(valueName);
       const sku = memberId
         ? `${base.ml_item_id}#${memberId}`
         : `${base.ml_item_id}#e:${norm(valueName)}`;
@@ -378,6 +386,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
           sku,
           etiqueta: valueName,
           group_member_id: memberId,
+          es_eleccion: esEleccion,
           stock_ml_seed: v.cantidad_ml ?? 0,
           id: exist?.id,
         });
@@ -399,6 +408,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
           sku: def.sku,
           etiqueta: def.etiqueta,
           group_member_id: def.group_member_id,
+          es_eleccion: def.es_eleccion,
           activo: true,
         })
         .eq("id", def.id);
@@ -408,6 +418,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
         sku: def.sku,
         etiqueta: def.etiqueta,
         group_member_id: def.group_member_id,
+        es_eleccion: def.es_eleccion,
         stock_ml: def.stock_ml_seed,
       });
     }

@@ -3,6 +3,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 import { planificar } from "./bom";
+import { inicioDiaAR } from "./fecha";
 
 type DB = SupabaseClient<Database>;
 type AlertaIns = Database["public"]["Tables"]["alerts"]["Insert"];
@@ -16,35 +17,42 @@ export async function regenerarAlertas(db: DB): Promise<number> {
 
   const filas: AlertaIns[] = [];
 
-  // --- stock crítico (variantes activas sin stock real) ---
-  const { data: vars } = await db
-    .from("product_variants")
-    .select("stock_real, stock_minimo, etiqueta, products(nombre)")
-    .eq("activo", true);
-  const sinStock = (vars ?? []).filter((v) => v.stock_real <= 0);
-  const bajos = (vars ?? []).filter(
-    (v) => v.stock_real > 0 && v.stock_real < v.stock_minimo,
+  // --- stock crítico (a nivel PRODUCTO, no variante) ---
+  // Un producto simple está "sin stock" sólo si TODAS sus variantes reales están
+  // en 0. Los holders (stock derivado de piezas) y los packs con receta (se
+  // arman por pedido) no cuentan acá — su faltante sale por el plan de producción.
+  const [{ data: vars }, { data: vcRows }] = await Promise.all([
+    db
+      .from("product_variants")
+      .select("id, product_id, stock_real, es_eleccion, products(nombre)")
+      .eq("activo", true),
+    db.from("variant_components").select("variant_id"),
+  ]);
+  const conBom = new Set((vcRows ?? []).map((r) => r.variant_id));
+  const porProducto = new Map<
+    string,
+    { nombre: string; total: number; conReceta: boolean }
+  >();
+  for (const v of vars ?? []) {
+    if (v.es_eleccion) continue;
+    const cur = porProducto.get(v.product_id) ?? {
+      nombre: (v.products as { nombre?: string } | null)?.nombre ?? "?",
+      total: 0,
+      conReceta: false,
+    };
+    cur.total += Math.max(0, v.stock_real);
+    if (conBom.has(v.id)) cur.conReceta = true;
+    porProducto.set(v.product_id, cur);
+  }
+  const sinStock = [...porProducto.values()].filter(
+    (p) => !p.conReceta && p.total <= 0,
   );
   if (sinStock.length) {
     filas.push({
       tipo: "auto:stock_critico",
       severidad: "danger",
-      titulo: `${sinStock.length} variante(s) sin stock`,
-      detalle: sinStock
-        .slice(0, 4)
-        .map(
-          (v) =>
-            `${(v.products as { nombre?: string } | null)?.nombre ?? "?"} (${v.etiqueta})`,
-        )
-        .join(" · "),
-    });
-  }
-  if (bajos.length) {
-    filas.push({
-      tipo: "auto:stock_bajo",
-      severidad: "warn",
-      titulo: `${bajos.length} variante(s) por debajo del mínimo`,
-      detalle: "Revisá Stock y el plan de producción.",
+      titulo: `${sinStock.length} producto(s) sin stock`,
+      detalle: sinStock.slice(0, 4).map((p) => p.nombre).join(" · "),
     });
   }
 
@@ -96,12 +104,11 @@ export async function regenerarAlertas(db: DB): Promise<number> {
   }
 
   // --- ventas del día (positiva) ---
-  const hoy = new Date().toISOString().slice(0, 10);
   const { data: pedidosHoy } = await db
     .from("ml_orders")
     .select("total")
     .eq("estado", "paid")
-    .gte("fecha", hoy);
+    .gte("fecha", inicioDiaAR());
   if (pedidosHoy && pedidosHoy.length >= 3) {
     filas.push({
       tipo: "auto:ventas_dia",

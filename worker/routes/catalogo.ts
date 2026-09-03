@@ -40,7 +40,8 @@ catalogo.get("/resumen", async (c) => {
 
 // Arma automáticamente la lista de materiales de los holders con variante por
 // integrante (1 cuerpo 3D + 1 llavero 3D propio del holder + 1 photocard de
-// imprenta por variante). Idempotente.
+// imprenta por variante) y de los packs de mostacillas / letras (receta fija).
+// También carga los tiempos de impresión por placa. Idempotente.
 catalogo.post("/derivar-bom", async (c) => {
   const db = supa(c.env);
   try {
@@ -74,24 +75,67 @@ const jaccard = (a: Set<string>, b: Set<string>) => {
 
 catalogo.get("/agrupables", async (c) => {
   const db = supa(c.env);
-  const [{ data: listings, error }, { data: grupos }] = await Promise.all([
-    db
-      .from("ml_listings")
-      .select(
-        "id, ml_item_id, titulo, thumbnail, estado, precio, tiene_variantes, grupo_id",
-      )
-      .order("titulo"),
-    db.from("listing_groups").select("id, nombre, canonical_listing_id"),
-  ]);
+  const [{ data: listings, error }, { data: grupos }, { data: lvars }] =
+    await Promise.all([
+      db
+        .from("ml_listings")
+        .select(
+          "id, ml_item_id, titulo, thumbnail, estado, precio, tiene_variantes, grupo_id",
+        )
+        .order("titulo"),
+      db.from("listing_groups").select("id, nombre, canonical_listing_id"),
+      db
+        .from("ml_listing_variations")
+        .select("ml_listing_id, combinacion"),
+    ]);
   if (error) return c.json({ error: error.message }, 500);
 
   const ls = listings ?? [];
   const sueltas = ls.filter((l) => !l.grupo_id);
 
-  // sugerencias: por thumbnail idéntico o por título muy parecido
   const tokMap = new Map(sueltas.map((l) => [l.id, tokens(l.titulo)]));
   const usados = new Set<string>();
   const sugerencias: string[][] = [];
+
+  // 1) combo ↔ suelta: una publicación con variantes (ej. "Plancha Stickers …
+  //    BT21 Cute / BANGTAN") + publicaciones sueltas del mismo diseño ("Plancha
+  //    Stickers Bts Bangtan"). Se cruza el título de la suelta contra los
+  //    nombres de variante de la combo. Va primero para que no se confundan
+  //    entre sí dos sueltas de distinto diseño de la misma familia.
+  const nombresVarPorListing = new Map<string, string[]>();
+  for (const v of lvars ?? []) {
+    const nom =
+      (v.combinacion as Array<{ value_name?: string }> | null)?.[0]?.value_name;
+    if (!nom) continue;
+    const arr = nombresVarPorListing.get(v.ml_listing_id) ?? [];
+    arr.push(nom);
+    nombresVarPorListing.set(v.ml_listing_id, arr);
+  }
+  for (const combo of sueltas.filter((l) => l.tiene_variantes)) {
+    const tokCombo = tokMap.get(combo.id)!;
+    const nombresVar = (nombresVarPorListing.get(combo.id) ?? []).map((n) =>
+      tokens(n),
+    );
+    if (!nombresVar.some((t) => t.size > 0)) continue;
+    const cluster = [combo.id];
+    for (const s of sueltas) {
+      if (s.tiene_variantes || usados.has(s.id)) continue;
+      const tokS = tokMap.get(s.id)!;
+      const comparteFamilia = [...tokS].some(
+        (t) => tokCombo.has(t) && !nombresVar.some((nv) => nv.has(t)),
+      );
+      const matcheaVariante = nombresVar.some(
+        (nv) => nv.size > 0 && [...nv].every((t) => tokS.has(t)),
+      );
+      if (comparteFamilia && matcheaVariante) cluster.push(s.id);
+    }
+    if (cluster.length > 1) {
+      cluster.forEach((id) => usados.add(id));
+      sugerencias.push(cluster);
+    }
+  }
+
+  // 2) resto: por thumbnail idéntico o por título muy parecido
   for (let i = 0; i < sueltas.length; i++) {
     const a = sueltas[i];
     if (usados.has(a.id)) continue;

@@ -41,7 +41,10 @@ export function Inicio() {
     <div>
       <PageHeader
         titulo={saludo()}
-        subtitulo={hoyLargo.charAt(0).toUpperCase() + hoyLargo.slice(1)}
+        subtitulo={(() => {
+          const h = hoyLargo();
+          return h.charAt(0).toUpperCase() + h.slice(1);
+        })()}
       />
 
       {loading && <EmptyHint>Cargando resumen…</EmptyHint>}

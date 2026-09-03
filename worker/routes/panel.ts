@@ -3,9 +3,19 @@ import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
-import { syncOneItem } from "../lib/sync";
-import { planificar } from "../lib/bom";
+import { syncEnvio, syncOneItem } from "../lib/sync";
+import { sheetsConfigurado } from "../lib/sheets";
+import {
+  calcBuffer,
+  calcMinimo,
+  esVariantePieza,
+  planificar,
+  ventasMulti,
+  ventasRecientes,
+} from "../lib/bom";
 import { regenerarAlertas } from "../lib/alertas";
+import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
+import { etiquetaLogistica, pedidoActivo } from "../lib/envios";
 
 export const panel = new Hono<{ Bindings: Env }>();
 
@@ -18,7 +28,7 @@ panel.get("/publicaciones", async (c) => {
   let query = db
     .from("ml_listings")
     .select(
-      "id, ml_item_id, titulo, estado, precio, moneda, cantidad_ml, tiene_variantes, permalink, thumbnail",
+      "id, ml_item_id, titulo, estado, precio, moneda, cantidad_ml, tiene_variantes, permalink, thumbnail, categoria_sugerida, categoria_analisis, reemplazada_por",
     )
     .order("titulo");
   if (estado && estado !== "todas") query = query.eq("estado", estado);
@@ -51,6 +61,9 @@ panel.get("/publicaciones", async (c) => {
       thumbnail: l.thumbnail?.replace(/^http:/, "https:") ?? null,
       variantes: agg.n,
       stock_ml: l.tiene_variantes ? agg.stock : (l.cantidad_ml ?? 0),
+      categoria_sugerida: l.categoria_sugerida,
+      categoria_analisis: l.categoria_analisis,
+      reemplazada_por: l.reemplazada_por,
     };
   });
 
@@ -133,53 +146,235 @@ panel.get("/metricas", async (c) => {
 });
 
 // --- Stock y producción ---
-function evaluarStock(real: number, minimo: number) {
-  if (real <= 0) return { tono: "danger" as const, label: "Sin stock" };
-  if (minimo > 0 && real <= Math.ceil(minimo * 0.4))
-    return { tono: "danger" as const, label: "Crítico" };
-  if (real < minimo) return { tono: "warn" as const, label: "Bajo" };
-  return { tono: "ok" as const, label: "OK" };
-}
 
-const PEOR = (t: string[]): "danger" | "warn" | "ok" =>
-  t.includes("danger") ? "danger" : t.includes("warn") ? "warn" : "ok";
-
-// El "vendible" de un holder + integrante (product_variants.stock_real) se deriva
-// de las piezas reales que carga Elias: mín sobre cada componente del BOM de
-// floor(stock_componente / cantidad). Nunca se edita a mano.
+// Recalcula todo lo derivado:
+//  1. product_variants.stock_real de los holders = mín sobre el BOM (Elias carga
+//     las piezas, no el "vendible"). Las variantes "random/elección" se topean
+//     por el total de photocards del producto.
+//  2. product_variants.stock_ml (buffer publicado en ML) = calcBuffer(stock_real),
+//     para TODAS las variantes. El buffer nunca se edita a mano.
 async function recalcularDerivado(db: ReturnType<typeof supa>) {
   const { data: vc } = await db
     .from("variant_components")
     .select("variant_id, component_id, cantidad");
-  if (!vc?.length) return;
-  const { data: comps } = await db.from("components").select("id, stock_real");
-  const stockComp = new Map((comps ?? []).map((x) => [x.id, x.stock_real]));
-  const porVar = new Map<
-    string,
-    Array<{ component_id: string; cantidad: number }>
-  >();
-  for (const r of vc) {
-    if (!porVar.has(r.variant_id)) porVar.set(r.variant_id, []);
-    porVar.get(r.variant_id)!.push(r);
-  }
-  const { data: vars } = await db
-    .from("product_variants")
-    .select("id, stock_real")
-    .in("id", [...porVar.keys()]);
-  for (const v of vars ?? []) {
-    const lines = porVar.get(v.id)!;
-    const real = Math.min(
-      ...lines.map((l) =>
-        Math.floor((stockComp.get(l.component_id) ?? 0) / (l.cantidad || 1)),
-      ),
+
+  if (vc?.length) {
+    const { data: comps } = await db
+      .from("components")
+      .select("id, stock_real, origen");
+    const stockComp = new Map((comps ?? []).map((x) => [x.id, x.stock_real]));
+    const origenComp = new Map((comps ?? []).map((x) => [x.id, x.origen]));
+    const porVar = new Map<
+      string,
+      Array<{ component_id: string; cantidad: number }>
+    >();
+    for (const r of vc) {
+      if (!porVar.has(r.variant_id)) porVar.set(r.variant_id, []);
+      porVar.get(r.variant_id)!.push(r);
+    }
+    const { data: vars } = await db
+      .from("product_variants")
+      .select("id, stock_real, product_id")
+      .in("id", [...porVar.keys()]);
+    const { data: prods } = await db
+      .from("products")
+      .select("id, variantes_por_integrante");
+    const esHolderProd = new Map(
+      (prods ?? []).map((p) => [p.id, p.variantes_por_integrante]),
     );
-    if (real !== v.stock_real)
+
+    const pcCompsPorProd = new Map<string, Set<string>>();
+    for (const v of vars ?? []) {
+      for (const l of porVar.get(v.id) ?? []) {
+        if (origenComp.get(l.component_id) !== "imprenta") continue;
+        if (!pcCompsPorProd.has(v.product_id))
+          pcCompsPorProd.set(v.product_id, new Set());
+        pcCompsPorProd.get(v.product_id)!.add(l.component_id);
+      }
+    }
+    const totalPcPorProd = new Map<string, number>();
+    for (const [pid, set] of pcCompsPorProd) {
+      let s = 0;
+      for (const cid of set) s += stockComp.get(cid) ?? 0;
+      totalPcPorProd.set(pid, s);
+    }
+
+    for (const v of vars ?? []) {
+      const lines = porVar.get(v.id)!;
+      // "producto = pieza" (ej. llavero suelto): stock = el de la pieza, se
+      // carga una sola vez en la pieza.
+      if (!esHolderProd.get(v.product_id)) {
+        if (esVariantePieza(lines)) {
+          const real = stockComp.get(lines[0].component_id) ?? 0;
+          if (real !== v.stock_real)
+            await db
+              .from("product_variants")
+              .update({ stock_real: real })
+              .eq("id", v.id);
+        }
+        // los packs de mostacillas tienen BOM pero su stock (packs ya armados)
+        // lo lleva Elias a mano; el BOM sólo alimenta el planificador.
+        continue;
+      }
+      let real = Math.min(
+        ...lines.map((l) =>
+          Math.floor((stockComp.get(l.component_id) ?? 0) / (l.cantidad || 1)),
+        ),
+      );
+      const tienePc = lines.some(
+        (l) => origenComp.get(l.component_id) === "imprenta",
+      );
+      if (esHolderProd.get(v.product_id) && !tienePc)
+        real = Math.min(real, totalPcPorProd.get(v.product_id) ?? 0);
+      if (real !== v.stock_real)
+        await db
+          .from("product_variants")
+          .update({ stock_real: real })
+          .eq("id", v.id);
+    }
+  }
+
+  const [{ data: allVars }, { data: prodsPI }, ventas] = await Promise.all([
+    db
+      .from("product_variants")
+      .select(
+        "id, stock_real, stock_ml, stock_minimo, product_id, group_member_id, etiqueta, es_eleccion",
+      )
+      .eq("activo", true),
+    db.from("products").select("id, variantes_por_integrante"),
+    ventasMulti(db, [7, 30]),
+  ]);
+  const esHolder = new Map(
+    (prodsPI ?? []).map((p) => [p.id, p.variantes_por_integrante]),
+  );
+  const v7 = ventas.get(7)!;
+  const v30 = ventas.get(30)!;
+
+  const bomLinesVar = new Map<string, Array<{ component_id: string; cantidad: number }>>();
+  for (const r of vc ?? []) {
+    if (!bomLinesVar.has(r.variant_id)) bomLinesVar.set(r.variant_id, []);
+    bomLinesVar.get(r.variant_id)!.push(r);
+  }
+  // "producto = pieza": su stock/mínimo lo lleva la pieza, no la variante.
+  const esPieza = (vid: string, pid: string) =>
+    !esHolder.get(pid) && esVariantePieza(bomLinesVar.get(vid));
+
+  // "Qué se puede vender" de las variantes reales (no elección) de cada producto
+  // simple → de ahí sale el stock que se le muestra a la variante "Random".
+  const realPorProd = new Map<string, number>();
+  for (const v of allVars ?? []) {
+    if (v.es_eleccion || esHolder.get(v.product_id)) continue;
+    realPorProd.set(
+      v.product_id,
+      (realPorProd.get(v.product_id) ?? 0) + Math.max(0, v.stock_real),
+    );
+  }
+
+  const minimoVar = new Map<string, number>();
+  for (const v of allVars ?? []) {
+    const patch: Record<string, number> = {};
+
+    // stock_real de la variante "Random" de un producto simple = suma de las
+    // reales (no se edita a mano; los holders siguen su propio camino).
+    const realEfectivo =
+      v.es_eleccion && !esHolder.get(v.product_id)
+        ? (realPorProd.get(v.product_id) ?? 0)
+        : v.stock_real;
+    if (v.es_eleccion && !esHolder.get(v.product_id) && realEfectivo !== v.stock_real)
+      patch.stock_real = realEfectivo;
+
+    // mínimo automático por ventas (las de elección no tienen mínimo propio).
+    if (!v.es_eleccion) {
+      const min = calcMinimo(
+        v7.porVariante.get(v.id) ?? 0,
+        v30.porVariante.get(v.id) ?? 0,
+        v30.porProducto.get(v.product_id) ?? 0,
+      );
+      minimoVar.set(v.id, min);
+      // Se persiste sólo en variantes de productos simples "de verdad". En
+      // holders y en "producto = pieza" el mínimo lo lleva la pieza (ver abajo).
+      if (
+        !esHolder.get(v.product_id) &&
+        !esPieza(v.id, v.product_id) &&
+        min !== v.stock_minimo
+      )
+        patch.stock_minimo = min;
+    }
+
+    // buffer publicado en ML
+    const buf = calcBuffer(realEfectivo);
+    if (buf !== v.stock_ml) patch.stock_ml = buf;
+
+    if (Object.keys(patch).length)
       await db
         .from("product_variants")
-        .update({ stock_real: real })
+        .update(patch as Database["public"]["Tables"]["product_variants"]["Update"])
         .eq("id", v.id);
   }
+
+  // mínimo de las piezas (cuerpos / llaveros / photocards) = demanda mínima que
+  // arrastran las variantes que las consumen SIN armado (holders + "producto =
+  // pieza"). Las piezas de packs (logos, letras, nombres) NO llevan mínimo:
+  // Elias las imprime por pedido — el planificador ya calcula cuánto hace falta.
+  const prodDeVar = new Map((allVars ?? []).map((v) => [v.id, v.product_id]));
+  const arrastraMinimo = (vid: string) => {
+    const pid = prodDeVar.get(vid);
+    return !!pid && (esHolder.get(pid) || esPieza(vid, pid));
+  };
+  const { data: compsMin } = await db
+    .from("components")
+    .select("id, stock_minimo");
+  const minimoComp = new Map<string, number>();
+  for (const r of vc ?? []) {
+    if (!arrastraMinimo(r.variant_id)) continue;
+    const add = (minimoVar.get(r.variant_id) ?? 0) * (r.cantidad || 1);
+    if (add) minimoComp.set(r.component_id, (minimoComp.get(r.component_id) ?? 0) + add);
+  }
+  for (const comp of compsMin ?? []) {
+    const min = minimoComp.get(comp.id) ?? 0;
+    if (min !== comp.stock_minimo)
+      await db.from("components").update({ stock_minimo: min }).eq("id", comp.id);
+  }
 }
+
+// Cantidades publicadas hoy en ML por variante — SÓLO publicaciones activas
+// (las pausadas/finalizadas/en revisión no se pueden actualizar).
+async function publicadoEnML(db: ReturnType<typeof supa>) {
+  const [{ data: mlvs }, { data: mls }] = await Promise.all([
+    db
+      .from("ml_listing_variations")
+      .select("ml_listing_id, product_variant_id, cantidad_ml"),
+    db
+      .from("ml_listings")
+      .select("id, product_id, cantidad_ml, tiene_variantes, estado"),
+  ]);
+  const activas = new Set(
+    (mls ?? []).filter((m) => m.estado === "active").map((m) => m.id),
+  );
+  const porVar = new Map<string, number[]>();
+  for (const v of mlvs ?? []) {
+    if (!v.product_variant_id || !activas.has(v.ml_listing_id)) continue;
+    const arr = porVar.get(v.product_variant_id) ?? [];
+    arr.push(v.cantidad_ml ?? 0);
+    porVar.set(v.product_variant_id, arr);
+  }
+  const porProd = new Map<string, number[]>();
+  for (const m of mls ?? []) {
+    if (!m.product_id || m.tiene_variantes || m.estado !== "active") continue;
+    const arr = porProd.get(m.product_id) ?? [];
+    arr.push(m.cantidad_ml ?? 0);
+    porProd.set(m.product_id, arr);
+  }
+  return { porVar, porProd };
+}
+
+const GRUPO_TIPO: Record<string, string> = {
+  photocard: "Photocards",
+  cuerpo: "Cuerpos 3D",
+  llavero: "Llaveros 3D",
+  mostacilla: "Mostacillas",
+  producto: "Otros",
+};
 
 panel.get("/stock", async (c) => {
   const db = supa(c.env);
@@ -188,239 +383,303 @@ panel.get("/stock", async (c) => {
   const [
     { data: variants, error },
     { data: prods },
-    { data: mlvs },
-    { data: mls },
     { data: vc },
     { data: comps },
+    plan,
+    ventas,
+    ml,
   ] = await Promise.all([
     db
       .from("product_variants")
       .select(
-        "id, product_id, etiqueta, stock_real, stock_ml, stock_minimo, group_members(nombre)",
+        "id, product_id, etiqueta, stock_real, stock_ml, stock_minimo, es_eleccion, group_member_id, group_members(nombre)",
       )
       .eq("activo", true),
     db
       .from("products")
       .select(
-        "id, nombre, variantes_por_integrante, categories(nombre, origen), groups(nombre)",
+        "id, nombre, variantes_por_integrante, categories(nombre, slug), groups(nombre)",
       ),
-    db.from("ml_listing_variations").select("product_variant_id, cantidad_ml"),
-    db.from("ml_listings").select("product_id, cantidad_ml, tiene_variantes"),
     db.from("variant_components").select("variant_id, component_id, cantidad"),
-    db.from("components").select("id, nombre, origen, stock_real, stock_minimo"),
+    db
+      .from("components")
+      .select("id, nombre, origen, stock_real, stock_minimo, group_member_id"),
+    planificar(db),
+    ventasRecientes(db),
+    publicadoEnML(db),
   ]);
   if (error) return c.json({ error: error.message }, 500);
 
   type Prod = NonNullable<typeof prods>[number];
   const prodById = new Map((prods ?? []).map((p) => [p.id, p as Prod]));
   const compById = new Map((comps ?? []).map((x) => [x.id, x]));
-  // una variante puede estar en varias publicaciones (grupo): juntamos todas las
-  // cantidades publicadas y marcamos desync si alguna difiere del buffer.
-  const mlPorVariante = new Map<string, number[]>();
-  for (const v of mlvs ?? []) {
-    if (!v.product_variant_id) continue;
-    const arr = mlPorVariante.get(v.product_variant_id) ?? [];
-    arr.push(v.cantidad_ml ?? 0);
-    mlPorVariante.set(v.product_variant_id, arr);
-  }
-  const mlPorProducto = new Map<string, number[]>();
-  for (const m of mls ?? []) {
-    if (!m.product_id || m.tiene_variantes) continue;
-    const arr = mlPorProducto.get(m.product_id) ?? [];
-    arr.push(m.cantidad_ml ?? 0);
-    mlPorProducto.set(m.product_id, arr);
-  }
-  // devuelve el nº publicado para mostrar (o null); desync se calcula aparte
-  const publicadoDe = (
-    variantId: string,
-    productId: string,
-    bufferMl: number,
-  ): number | null => {
-    const arr =
-      mlPorVariante.get(variantId) ?? mlPorProducto.get(productId) ?? [];
-    if (!arr.length) return null;
-    // si alguna difiere, devolvemos esa (para que el front marque desync)
-    const distinta = arr.find((n) => n !== bufferMl);
-    return distinta ?? arr[0];
-  };
-  const bomPorVar = new Map<
-    string,
-    Array<{ component_id: string; cantidad: number }>
-  >();
-  for (const r of vc ?? []) {
-    if (!bomPorVar.has(r.variant_id)) bomPorVar.set(r.variant_id, []);
-    bomPorVar.get(r.variant_id)!.push(r);
-  }
-
-  const nombreCat = (p?: Prod) =>
-    (p?.categories as { nombre?: string } | null)?.nombre ?? null;
-  const origenCat = (p?: Prod) =>
-    (p?.categories as { origen?: string } | null)?.origen ?? "impresora3d";
   const nombreGrp = (p?: Prod) =>
     (p?.groups as { nombre?: string } | null)?.nombre ?? null;
+  const slugCat = (p?: Prod) =>
+    (p?.categories as { slug?: string } | null)?.slug ?? null;
+  const nombreCat = (p?: Prod) =>
+    (p?.categories as { nombre?: string } | null)?.nombre ?? null;
 
-  interface Holder {
-    product_id: string;
+  const bomPorVar = new Map<string, string[]>();
+  const bomLinesPorVar = new Map<string, Array<{ cid: string; qty: number }>>();
+  for (const r of vc ?? []) {
+    if (!bomPorVar.has(r.variant_id)) bomPorVar.set(r.variant_id, []);
+    bomPorVar.get(r.variant_id)!.push(r.component_id);
+    if (!bomLinesPorVar.has(r.variant_id)) bomLinesPorVar.set(r.variant_id, []);
+    bomLinesPorVar.get(r.variant_id)!.push({ cid: r.component_id, qty: r.cantidad || 1 });
+  }
+  // "producto = pieza" (llavero suelto): 1 sola pieza ×1
+  const esVarPieza = (vid: string) =>
+    esVariantePieza((bomLinesPorVar.get(vid) ?? []).map((l) => ({ cantidad: l.qty })));
+  // cuántos packs se pueden armar YA con las piezas en stock
+  const armablesDeVariante = (vid: string): number => {
+    const lines = bomLinesPorVar.get(vid);
+    if (!lines?.length) return 0;
+    return Math.min(
+      ...lines.map((l) =>
+        Math.floor((compById.get(l.cid)?.stock_real ?? 0) / l.qty),
+      ),
+    );
+  };
+  const esHolderVar = (vid: string, pid: string) =>
+    !!prodById.get(pid)?.variantes_por_integrante &&
+    (bomPorVar.get(vid)?.length ?? 0) > 0;
+
+  // ---- piezas (lo único editable) ----
+  interface Pieza {
+    kind: "componente" | "variante";
+    id: string;
+    tipo: string;
+    grupo: string;
     nombre: string;
-    categoria: string | null;
-    grupo: string | null;
-    piezas: Array<{
-      component_id: string;
-      nombre: string;
-      stock_real: number;
-      stock_minimo: number;
-    }>;
-    photocards: Array<{
-      variant_id: string;
-      member: string;
-      component_id: string | null;
-      pc_stock_real: number | null;
-      pc_stock_minimo: number | null;
-      vendibles: number;
-      stock_minimo: number;
-      stock_ml: number;
-      publicado_ml: number | null;
-      estado_tono: string;
-      estado_label: string;
-    }>;
-    _piezaIds: Set<string>;
+    contexto: string | null;
+    stock_real: number;
+    stock_minimo: number;
+    producir: number;
+    estado_tono: "ok" | "warn" | "danger";
+  }
+  const piezas: Pieza[] = [];
+
+  const partir = (raw: string) => {
+    const p = raw.split(" · ").map((s) => s.trim());
+    if (p[0] === "Photocard")
+      return {
+        tipo: "photocard",
+        nombre: p[1] ?? "Photocard",
+        contexto: p[2] ?? null,
+      };
+    if (p[0] === "Cuerpo")
+      return { tipo: "cuerpo", nombre: "Cuerpo", contexto: p.slice(1).join(" · ") || null };
+    if (p[0] === "Llavero")
+      return { tipo: "llavero", nombre: "Llavero", contexto: p.slice(1).join(" · ") || null };
+    // piezas 3D de packs (logos arirang, sets de nombres, letras BTS)
+    if (/^(Logo |Set nombres|Letras )/.test(raw))
+      return { tipo: "mostacilla", nombre: raw, contexto: null };
+    return { tipo: "producto", nombre: raw, contexto: null };
+  };
+  const mkPieza = (
+    kind: Pieza["kind"],
+    id: string,
+    tipo: string,
+    nombre: string,
+    contexto: string | null,
+    real: number,
+    minimo: number,
+    producir: number,
+  ): Pieza => ({
+    kind,
+    id,
+    tipo,
+    grupo: GRUPO_TIPO[tipo] ?? "Otros",
+    nombre,
+    contexto,
+    stock_real: real,
+    stock_minimo: minimo,
+    producir,
+    estado_tono: real <= 0 ? "danger" : producir > 0 ? "warn" : "ok",
+  });
+
+  // componentes = piezas de holders (cuerpo / llavero / photocard por integrante)
+  for (const comp of comps ?? []) {
+    const { tipo, nombre, contexto } = partir(comp.nombre);
+    piezas.push(
+      mkPieza(
+        "componente",
+        comp.id,
+        tipo,
+        nombre,
+        contexto,
+        comp.stock_real,
+        comp.stock_minimo,
+        plan.producir_componente[comp.id] ?? 0,
+      ),
+    );
   }
 
-  const simples: Array<Record<string, unknown>> = [];
-  const holdersMap = new Map<string, Holder>();
-  let bajo = 0;
-
+  // variantes de productos simples (mostacillas, clickers, stickers, llaveros…)
   for (const v of variants ?? []) {
+    if (esHolderVar(v.id, v.product_id)) continue;
+    // "Random / a elección": no es una pieza con stock propio.
+    if (v.es_eleccion) continue;
+    // "producto = pieza": Elias edita la pieza (aparece en "Llaveros 3D").
+    if (esVarPieza(v.id)) continue;
     const p = prodById.get(v.product_id);
-    const bom = bomPorVar.get(v.id) ?? [];
-    const esHolder = !!p?.variantes_por_integrante && bom.length > 0;
-    const publicadoMl = publicadoDe(v.id, v.product_id, v.stock_ml);
     const member =
       (v.group_members as { nombre?: string } | null)?.nombre ?? null;
-    const ev = evaluarStock(v.stock_real, v.stock_minimo);
-    if (v.stock_real < v.stock_minimo) bajo++;
-
-    if (!esHolder) {
-      const prodNombre = p?.nombre ?? "—";
-      simples.push({
-        id: v.id,
-        nombre:
-          v.etiqueta === "Único" || !member
-            ? prodNombre
-            : `${prodNombre} — ${member}`,
-        categoria: nombreCat(p) ?? "Sin categoría",
-        origen: origenCat(p),
-        grupo: nombreGrp(p),
-        stock_real: v.stock_real,
-        stock_ml: v.stock_ml,
-        publicado_ml: publicadoMl,
-        stock_minimo: v.stock_minimo,
-        estado_tono: ev.tono,
-        estado_label: ev.label,
-      });
-      continue;
-    }
-
-    let h = holdersMap.get(v.product_id);
-    if (!h) {
-      h = {
-        product_id: v.product_id,
-        nombre: p!.nombre,
-        categoria: nombreCat(p) ?? "Holders",
-        grupo: nombreGrp(p),
-        piezas: [],
-        photocards: [],
-        _piezaIds: new Set(),
-      };
-      holdersMap.set(v.product_id, h);
-    }
-    for (const line of bom) {
-      const comp = compById.get(line.component_id);
-      if (!comp || comp.origen === "imprenta" || h._piezaIds.has(comp.id))
-        continue;
-      h._piezaIds.add(comp.id);
-      h.piezas.push({
-        component_id: comp.id,
-        nombre: comp.nombre.startsWith("Llavero · ") ? "Llavero" : "Cuerpo",
-        stock_real: comp.stock_real,
-        stock_minimo: comp.stock_minimo,
-      });
-    }
-    const pcLine = bom.find(
-      (l) => compById.get(l.component_id)?.origen === "imprenta",
+    const slug = slugCat(p);
+    const tipo = slug === "mostacillas" ? "mostacilla" : "producto";
+    const variante = member ?? (v.etiqueta !== "Único" ? v.etiqueta : null);
+    piezas.push(
+      mkPieza(
+        "variante",
+        v.id,
+        tipo,
+        p?.nombre ?? "—",
+        variante ?? nombreCat(p) ?? nombreGrp(p),
+        v.stock_real,
+        v.stock_minimo,
+        plan.producir_variante[v.id] ?? 0,
+      ),
     );
-    const pc = pcLine ? compById.get(pcLine.component_id) : null;
-    h.photocards.push({
-      variant_id: v.id,
-      member: member ?? v.etiqueta,
-      component_id: pc?.id ?? null,
-      pc_stock_real: pc?.stock_real ?? null,
-      pc_stock_minimo: pc?.stock_minimo ?? null,
-      vendibles: v.stock_real,
-      stock_minimo: v.stock_minimo,
-      stock_ml: v.stock_ml,
-      publicado_ml: publicadoMl,
-      estado_tono: ev.tono,
-      estado_label: ev.label,
-    });
   }
 
-  const holders = [...holdersMap.values()].map((h) => {
-    const { _piezaIds, ...rest } = h;
-    void _piezaIds;
-    rest.photocards.sort((a, b) => a.member.localeCompare(b.member));
-    // vendible real del holder = mín(cuerpos, llaveros, Σ photocards)
-    const min3d = rest.piezas.length
-      ? Math.min(...rest.piezas.map((p) => p.stock_real))
-      : Infinity;
-    const totalPc = rest.photocards.reduce(
-      (s, p) => s + (p.pc_stock_real ?? 0),
-      0,
-    );
-    return {
-      ...rest,
-      vendibles_total: Math.max(
-        0,
-        Math.min(min3d === Infinity ? totalPc : min3d, totalPc),
-      ),
-      estado_tono: PEOR([
-        ...rest.piezas.map(
-          (p) => evaluarStock(p.stock_real, p.stock_minimo).tono,
-        ),
-        ...rest.photocards.map((p) => p.estado_tono),
-      ]),
-    };
-  });
-  holders.sort((a, b) => a.nombre.localeCompare(b.nombre));
-  simples.sort(
+  piezas.sort(
     (a, b) =>
-      (a.stock_real as number) -
-      (a.stock_minimo as number) -
-      ((b.stock_real as number) - (b.stock_minimo as number)),
+      (b.producir > 0 || a.stock_real <= 0 ? 0 : 1) -
+        (a.producir > 0 || b.stock_real <= 0 ? 0 : 1) ||
+      b.producir - a.producir ||
+      a.nombre.localeCompare(b.nombre),
   );
 
+  // ---- productos (sólo lectura: "qué puedo despachar hoy") ----
+  // Un renglón por producto activo, con las unidades que se pueden vender ya:
+  //  · holder  → derivado de las piezas (cuerpo/llavero/photocard)
+  //  · simple  → suma del stock real de sus variantes
+  interface ProdResumen {
+    product_id: string;
+    nombre: string;
+    grupo: string | null;
+    vendibles: number;
+    sin_stock_de: string[];
+    estado_tono: "ok" | "warn" | "danger";
+  }
+  const gmNombre = new Map(
+    (comps ?? [])
+      .filter((c) => c.group_member_id)
+      .map((c) => [c.id, partir(c.nombre).nombre]),
+  );
+
+  const holderAgg = new Map<
+    string,
+    { nombre: string; grupo: string | null; pc: Set<string>; d3: number[] }
+  >();
+  const simpleAgg = new Map<
+    string,
+    { nombre: string; grupo: string | null; total: number; sin: string[] }
+  >();
+
+  for (const v of variants ?? []) {
+    if (v.es_eleccion) continue;
+    const p = prodById.get(v.product_id);
+    if (esHolderVar(v.id, v.product_id)) {
+      let h = holderAgg.get(v.product_id);
+      if (!h) {
+        h = { nombre: p?.nombre ?? "—", grupo: nombreGrp(p), pc: new Set(), d3: [] };
+        holderAgg.set(v.product_id, h);
+      }
+      for (const cid of bomPorVar.get(v.id) ?? []) {
+        const comp = compById.get(cid);
+        if (!comp) continue;
+        if (comp.origen === "imprenta") h.pc.add(cid);
+        else if (!h.d3.includes(comp.stock_real)) h.d3.push(comp.stock_real);
+      }
+    } else {
+      let s = simpleAgg.get(v.product_id);
+      if (!s) {
+        s = { nombre: p?.nombre ?? "—", grupo: nombreGrp(p) ?? nombreCat(p), total: 0, sin: [] };
+        simpleAgg.set(v.product_id, s);
+      }
+      // packs con receta: lo armado a mano + lo que se puede armar ya con piezas.
+      // "producto = pieza" (llavero suelto): su stock_real ya ES el de la pieza.
+      const disponible = esVarPieza(v.id)
+        ? Math.max(0, v.stock_real)
+        : Math.max(0, v.stock_real) + armablesDeVariante(v.id);
+      s.total += disponible;
+      if (disponible <= 0) {
+        const member = (v.group_members as { nombre?: string } | null)?.nombre ?? null;
+        const etq = member ?? (v.etiqueta !== "Único" ? v.etiqueta : null);
+        if (etq) s.sin.push(etq);
+      }
+    }
+  }
+
+  const productos: ProdResumen[] = [];
+  for (const [pid, h] of holderAgg) {
+    const pcStock = [...h.pc].map((cid) => compById.get(cid)?.stock_real ?? 0);
+    const totalPc = pcStock.reduce((s, n) => s + n, 0);
+    const min3d = h.d3.length ? Math.min(...h.d3) : Infinity;
+    const vendibles = Math.max(0, Math.min(min3d === Infinity ? totalPc : min3d, totalPc));
+    const ventas14 = ventas.porProducto.get(pid) ?? 0;
+    const sin = [...h.pc]
+      .filter((cid) => (compById.get(cid)?.stock_real ?? 0) <= 0)
+      .map((cid) => gmNombre.get(cid) ?? "")
+      .filter(Boolean);
+    productos.push({
+      product_id: pid,
+      nombre: h.nombre,
+      grupo: h.grupo,
+      vendibles,
+      sin_stock_de: sin,
+      estado_tono:
+        vendibles <= 0 ? "danger" : vendibles < (ventas14 / 14) * 7 ? "warn" : "ok",
+    });
+  }
+  for (const [pid, s] of simpleAgg) {
+    const ventas14 = ventas.porProducto.get(pid) ?? 0;
+    productos.push({
+      product_id: pid,
+      nombre: s.nombre,
+      grupo: s.grupo,
+      vendibles: s.total,
+      sin_stock_de: s.sin,
+      estado_tono:
+        s.total <= 0 ? "danger" : s.total < (ventas14 / 14) * 7 ? "warn" : "ok",
+    });
+  }
+  const tonoRank = { danger: 0, warn: 1, ok: 2 } as const;
+  productos.sort(
+    (a, b) =>
+      tonoRank[a.estado_tono] - tonoRank[b.estado_tono] ||
+      a.nombre.localeCompare(b.nombre),
+  );
+
+  // ---- resumen ----
+  let desync = 0;
+  for (const v of variants ?? []) {
+    const live = ml.porVar.get(v.id) ?? ml.porProd.get(v.product_id) ?? [];
+    if (live.some((n) => n !== v.stock_ml)) desync++;
+  }
+
   return c.json({
-    simples,
-    holders,
-    bajo_minimo: bajo,
-    sin_catalogo: (variants?.length ?? 0) === 0,
+    piezas,
+    productos,
+    resumen: {
+      piezas_a_producir: piezas.filter((p) => p.producir > 0).length,
+      ml_desincronizado: desync,
+      sin_catalogo: (variants?.length ?? 0) === 0,
+    },
   });
 });
 
-// Editar stock de una variante (Elias carga el stock físico acá).
+// Editar el stock físico de una variante simple. El buffer de ML (calcBuffer) y
+// el mínimo (calcMinimo, por ventas) son automáticos — no se aceptan acá.
 panel.patch("/stock/:id", async (c) => {
   const id = c.req.param("id");
-  const body = await c.req.json<{
-    stock_real?: number;
-    stock_minimo?: number;
-    stock_ml?: number;
-  }>();
+  const body = await c.req.json<{ stock_real?: number }>();
   const patch: Record<string, number> = {};
-  for (const k of ["stock_real", "stock_minimo", "stock_ml"] as const) {
-    const v = body[k];
-    if (typeof v === "number" && Number.isFinite(v) && v >= 0)
-      patch[k] = Math.round(v);
-  }
+  const v = body.stock_real;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0)
+    patch.stock_real = Math.round(v);
   if (!Object.keys(patch).length)
     return c.json({ error: "nada para actualizar" }, 400);
 
@@ -442,19 +701,22 @@ async function resolverMLTodas(
 ): Promise<Array<{ itemId: string; variationId: string | null }>> {
   const { data: mlvs } = await db
     .from("ml_listing_variations")
-    .select("ml_variation_id, ml_listings(ml_item_id)")
+    .select("ml_variation_id, ml_listings(ml_item_id, estado)")
     .eq("product_variant_id", variantId);
 
   const refs = (mlvs ?? [])
     .map((v) => {
-      const itemId = (v.ml_listings as { ml_item_id?: string } | null)
-        ?.ml_item_id;
-      return itemId ? { itemId, variationId: v.ml_variation_id } : null;
+      const l = v.ml_listings as
+        | { ml_item_id?: string; estado?: string }
+        | null;
+      return l?.ml_item_id && l.estado === "active"
+        ? { itemId: l.ml_item_id, variationId: v.ml_variation_id }
+        : null;
     })
     .filter((x): x is { itemId: string; variationId: string } => x != null);
   if (refs.length) return refs;
 
-  // sin variaciones: publicación(es) sin variantes a nivel item
+  // sin variaciones: publicación(es) activas sin variantes a nivel item
   const { data: pv } = await db
     .from("product_variants")
     .select("product_id")
@@ -464,80 +726,24 @@ async function resolverMLTodas(
   const { data: mls } = await db
     .from("ml_listings")
     .select("ml_item_id")
-    .eq("product_id", pv.product_id);
+    .eq("product_id", pv.product_id)
+    .eq("estado", "active");
   return (mls ?? []).map((m) => ({ itemId: m.ml_item_id, variationId: null }));
 }
 
-// Publica el stock ML (buffer) de una variante en Mercado Libre.
-panel.post("/stock/:id/publicar", async (c) => {
-  const id = c.req.param("id");
+// Sincroniza Mercado Libre: recalcula los buffers automáticos y publica los que
+// quedaron desincronizados. El front lo llama solo (con debounce) tras cada
+// edición de stock, y también hay un botón manual.
+panel.post("/stock/sincronizar-ml", async (c) => {
   const db = supa(c.env);
-
-  const { data: pv } = await db
-    .from("product_variants")
-    .select("stock_ml")
-    .eq("id", id)
-    .single();
-  if (!pv) return c.json({ error: "variante no encontrada" }, 404);
-
-  const refs = await resolverMLTodas(db, id);
-  if (!refs.length)
-    return c.json({ error: "no se pudo mapear a una publicación de ML" }, 409);
-
-  const errores: string[] = [];
-  const items = new Set<string>();
-  for (const ref of refs) {
-    const path = ref.variationId
-      ? `/items/${ref.itemId}/variations/${ref.variationId}`
-      : `/items/${ref.itemId}`;
-    const r = await mlFetch(c.env, db, path, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ available_quantity: pv.stock_ml }),
-    });
-    if (r.ok) items.add(ref.itemId);
-    else errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 150)}`);
-  }
-  if (!items.size)
-    return c.json({ error: errores.join(" · ").slice(0, 300) }, 502);
-
-  for (const it of items) {
-    try {
-      await syncOneItem(c.env, db, it);
-    } catch {
-      /* el push ya se hizo */
-    }
-  }
-  return c.json({ ok: true, publicado: pv.stock_ml, publicaciones: items.size, errores });
-});
-
-// Publica en ML el buffer de todas las variantes que están desincronizadas.
-panel.post("/stock/publicar-todo", async (c) => {
-  const db = supa(c.env);
+  await recalcularDerivado(db);
 
   const { data: vars } = await db
     .from("product_variants")
     .select("id, stock_ml, product_id")
     .eq("activo", true);
 
-  const [{ data: mlvs }, { data: mls }] = await Promise.all([
-    db.from("ml_listing_variations").select("product_variant_id, cantidad_ml"),
-    db.from("ml_listings").select("product_id, cantidad_ml, tiene_variantes"),
-  ]);
-  const mlPorVar = new Map<string, number[]>();
-  for (const v of mlvs ?? []) {
-    if (!v.product_variant_id) continue;
-    const arr = mlPorVar.get(v.product_variant_id) ?? [];
-    arr.push(v.cantidad_ml ?? 0);
-    mlPorVar.set(v.product_variant_id, arr);
-  }
-  const mlPorProd = new Map<string, number[]>();
-  for (const m of mls ?? []) {
-    if (!m.product_id || m.tiene_variantes) continue;
-    const arr = mlPorProd.get(m.product_id) ?? [];
-    arr.push(m.cantidad_ml ?? 0);
-    mlPorProd.set(m.product_id, arr);
-  }
+  const { porVar: mlPorVar, porProd: mlPorProd } = await publicadoEnML(db);
 
   const pendientes = (vars ?? []).filter((v) => {
     const live = mlPorVar.get(v.id) ?? mlPorProd.get(v.product_id) ?? [];
@@ -548,12 +754,9 @@ panel.post("/stock/publicar-todo", async (c) => {
   const errores: string[] = [];
   const itemsTocados = new Set<string>();
 
-  for (const v of pendientes.slice(0, 60)) {
+  const empujar = async (v: { id: string; stock_ml: number }) => {
     const refs = await resolverMLTodas(db, v.id);
-    if (!refs.length) {
-      errores.push(`${v.id}: sin mapeo`);
-      continue;
-    }
+    if (!refs.length) return;
     let algunoOk = false;
     for (const ref of refs) {
       const path = ref.variationId
@@ -572,7 +775,11 @@ panel.post("/stock/publicar-todo", async (c) => {
       }
     }
     if (algunoOk) ok++;
-  }
+  };
+
+  const lote = pendientes.slice(0, 80);
+  for (let i = 0; i < lote.length; i += 5)
+    await Promise.all(lote.slice(i, i + 5).map(empujar));
 
   for (const it of itemsTocados) {
     try {
@@ -606,13 +813,11 @@ panel.get("/componentes", async (c) => {
 
 panel.patch("/componentes/:id", async (c) => {
   const id = c.req.param("id");
-  const body = await c.req.json<{ stock_real?: number; stock_minimo?: number }>();
+  const body = await c.req.json<{ stock_real?: number }>();
   const patch: Record<string, number> = {};
-  for (const k of ["stock_real", "stock_minimo"] as const) {
-    const v = body[k];
-    if (typeof v === "number" && Number.isFinite(v) && v >= 0)
-      patch[k] = Math.round(v);
-  }
+  const v = body.stock_real;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0)
+    patch.stock_real = Math.round(v);
   if (!Object.keys(patch).length)
     return c.json({ error: "nada para actualizar" }, 400);
   const db = supa(c.env);
@@ -621,7 +826,8 @@ panel.patch("/componentes/:id", async (c) => {
     .update(patch as Database["public"]["Tables"]["components"]["Update"])
     .eq("id", id);
   if (error) return c.json({ error: error.message }, 500);
-  await recalcularDerivado(db);
+  // lo derivado (vendible + buffer) se recalcula en GET /stock y en
+  // POST /stock/sincronizar-ml — no bloqueamos el guardado acá.
   return c.json({ ok: true });
 });
 
@@ -635,8 +841,9 @@ const TONO_POR_SEV: Record<string, "ok" | "warn" | "danger" | "info"> = {
 
 panel.get("/inicio", async (c) => {
   const db = supa(c.env);
-  const hoy = new Date().toISOString().slice(0, 10);
-  const hace7 = new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
+  // "hoy" y "hace 7 días" en horario de Argentina (el Worker corre en UTC).
+  const hoy = inicioDiaAR();
+  const hace7 = inicioDiaAR(new Date(Date.now() - 6 * 864e5));
 
   const [ventasHoy, ventasSemana, listings, ultimosPedidos, alertasRows] =
     await Promise.all([
@@ -680,6 +887,179 @@ panel.get("/inicio", async (c) => {
     ultimos_pedidos: ultimosPedidos.data ?? [],
     alertas,
   });
+});
+
+// --- Pedidos activos (pagados y sin despachar), separados por logística ---
+panel.get("/pedidos-activos", async (c) => {
+  const db = supa(c.env);
+
+  const { data: orders, error } = await db
+    .from("ml_orders")
+    .select(
+      "id, ml_order_id, comprador, fecha, total, estado, estado_envio, envio_substatus, logistic_type, raw",
+    )
+    .eq("estado", "paid")
+    .gte("fecha", inicioDiaARHace(45))
+    .order("fecha", { ascending: true });
+  if (error) return c.json({ error: error.message }, 500);
+
+  const activos = (orders ?? []).filter((o) =>
+    pedidoActivo({ estado: o.estado, estado_envio: o.estado_envio, raw: o.raw }),
+  );
+
+  const { data: items } = await db
+    .from("ml_order_items")
+    .select("ml_order_id, titulo, cantidad")
+    .in(
+      "ml_order_id",
+      activos.map((o) => o.id),
+    );
+  const itemsPorPedido = new Map<string, Array<{ titulo: string; cantidad: number }>>();
+  for (const it of items ?? []) {
+    const arr = itemsPorPedido.get(it.ml_order_id) ?? [];
+    arr.push({ titulo: it.titulo ?? "—", cantidad: it.cantidad ?? 1 });
+    itemsPorPedido.set(it.ml_order_id, arr);
+  }
+
+  // Agrupar por envío/pack: ML puede juntar varios pedidos del mismo comprador
+  // en un solo paquete.
+  const shipId = (o: (typeof activos)[number]) => {
+    const raw = o.raw as { shipping?: { id?: unknown }; pack_id?: unknown } | null;
+    return (
+      (raw?.shipping?.id != null && String(raw.shipping.id)) ||
+      (raw?.pack_id != null && `pack:${raw.pack_id}`) ||
+      `order:${o.ml_order_id}`
+    );
+  };
+
+  interface Paquete {
+    key: string;
+    comprador: string | null;
+    fecha: string;
+    total: number;
+    items: Array<{ titulo: string; cantidad: number }>;
+    estado_envio: string | null;
+    envio_substatus: string | null;
+    etiqueta_logistica: string;
+    a_imprimir: boolean;
+  }
+  const paquetes = new Map<string, Paquete>();
+  for (const o of activos) {
+    const key = shipId(o);
+    const eti = etiquetaLogistica(o.logistic_type);
+    const cur = paquetes.get(key);
+    const its = itemsPorPedido.get(o.id) ?? [];
+    if (cur) {
+      cur.total += o.total ?? 0;
+      cur.items.push(...its);
+      if (o.fecha < cur.fecha) cur.fecha = o.fecha;
+    } else {
+      paquetes.set(key, {
+        key,
+        comprador: o.comprador,
+        fecha: o.fecha,
+        total: o.total ?? 0,
+        items: its,
+        estado_envio: o.estado_envio,
+        envio_substatus: o.envio_substatus,
+        etiqueta_logistica: eti,
+        a_imprimir:
+          o.envio_substatus === "ready_to_print" ||
+          o.estado_envio === "ready_to_ship",
+      });
+    }
+  }
+
+  const ORDEN = ["Flex", "Mercado Envíos", "Full", "Otro"];
+  const lista = [...paquetes.values()].sort(
+    (a, b) =>
+      ORDEN.indexOf(a.etiqueta_logistica) - ORDEN.indexOf(b.etiqueta_logistica) ||
+      a.fecha.localeCompare(b.fecha),
+  );
+  const conteos: Record<string, number> = {};
+  for (const p of lista)
+    conteos[p.etiqueta_logistica] = (conteos[p.etiqueta_logistica] ?? 0) + 1;
+
+  return c.json({ paquetes: lista, conteos, total: lista.length });
+});
+
+// --- Planilla de reparto (Google Sheets): pedidos Flex → filas por día ---
+panel.get("/pedidos/planilla", async (c) => {
+  const db = supa(c.env);
+  const desde = inicioDiaAR();
+
+  const [{ count: escritos }, { data: pend }, { data: ult }] = await Promise.all([
+    db
+      .from("ml_orders")
+      .select("id", { count: "exact", head: true })
+      .not("sheet_synced_at", "is", null),
+    db
+      .from("ml_orders")
+      .select("id")
+      .eq("estado", "paid")
+      .eq("logistic_type", "self_service")
+      .is("sheet_synced_at", null)
+      .gte("fecha", desde),
+    db
+      .from("ml_orders")
+      .select("sheet_synced_at")
+      .not("sheet_synced_at", "is", null)
+      .order("sheet_synced_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  return c.json({
+    configurado: sheetsConfigurado(c.env),
+    sheet_id: c.env.SHEETS_ID ?? null,
+    sheet_url: c.env.SHEETS_ID
+      ? `https://docs.google.com/spreadsheets/d/${c.env.SHEETS_ID}/edit`
+      : null,
+    escritos_total: escritos ?? 0,
+    pendientes: pend?.length ?? 0,
+    ultimo: (ult as { sheet_synced_at?: string } | null)?.sheet_synced_at ?? null,
+  });
+});
+
+// Rellena la planilla con los pedidos Flex de HOY que todavía no se escribieron
+// (ej. si Sheets estuvo caído, o para forzar la carga del día).
+panel.post("/pedidos/planilla/sync", async (c) => {
+  const db = supa(c.env);
+  if (!sheetsConfigurado(c.env))
+    return c.json(
+      { error: "Falta el Service Account de Google (GOOGLE_SA_EMAIL / GOOGLE_SA_PRIVATE_KEY)." },
+      409,
+    );
+
+  const { data: orders } = await db
+    .from("ml_orders")
+    .select("id, ml_order_id, raw, sheet_synced_at")
+    .eq("estado", "paid")
+    .is("sheet_synced_at", null)
+    .gte("fecha", inicioDiaAR())
+    .order("fecha", { ascending: true });
+
+  let escritos = 0;
+  const errores: string[] = [];
+  for (const o of orders ?? []) {
+    const raw = o.raw as { shipping?: { id?: unknown } } | null;
+    const shippingId =
+      raw?.shipping?.id != null ? String(raw.shipping.id) : null;
+    if (!shippingId) continue;
+    try {
+      await syncEnvio(c.env, db, { id: o.id, shippingId, status: "paid" });
+      const { data: after } = await db
+        .from("ml_orders")
+        .select("sheet_synced_at")
+        .eq("id", o.id)
+        .maybeSingle();
+      if ((after as { sheet_synced_at?: string } | null)?.sheet_synced_at)
+        escritos++;
+    } catch (e) {
+      errores.push(`${o.ml_order_id}: ${(e as Error).message}`);
+    }
+  }
+  return c.json({ escritos, revisados: orders?.length ?? 0, errores });
 });
 
 panel.post("/alertas/regenerar", async (c) => {

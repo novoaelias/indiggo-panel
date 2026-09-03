@@ -5,6 +5,11 @@ import type { Database, Json } from "@/lib/database.types";
 import type { Env } from "../env";
 import { getToken, mlFetch } from "./ml";
 import { regenerarAlertas } from "./alertas";
+import { derivarCatalogo } from "./derivar";
+import { derivarBOM } from "./bom";
+import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
+import { envioTerminado } from "./envios";
+import { hoyAR } from "./fecha";
 
 type DB = SupabaseClient<Database>;
 
@@ -108,7 +113,9 @@ async function upsertItem(db: DB, it: MlItem): Promise<void> {
     .single();
   if (error || !listing) throw new Error(`listing ${it.id}: ${error?.message}`);
 
+  const vigentes: string[] = [];
   for (const v of it.variations ?? []) {
+    vigentes.push(String(v.id));
     await db.from("ml_listing_variations").upsert(
       {
         ml_listing_id: listing.id,
@@ -121,6 +128,14 @@ async function upsertItem(db: DB, it: MlItem): Promise<void> {
       { onConflict: "ml_listing_id,ml_variation_id" },
     );
   }
+  // borrar variaciones que ML ya no reporta (evita empujar buffer a un
+  // ml_variation_id inexistente en cada sync)
+  let stale = db
+    .from("ml_listing_variations")
+    .delete()
+    .eq("ml_listing_id", listing.id);
+  if (vigentes.length) stale = stale.not("ml_variation_id", "in", `(${vigentes.join(",")})`);
+  await stale;
 }
 
 /** Sincroniza una sola publicación (usado por el webhook de notificaciones). */
@@ -198,7 +213,8 @@ interface MlOrder {
   date_created: string;
   total_amount: number | null;
   buyer?: { nickname?: string };
-  shipping?: { status?: string };
+  shipping?: { id?: number | string; status?: string };
+  tags?: string[];
   order_items?: Array<{
     item?: { id?: string; variation_id?: number | string; title?: string };
     quantity?: number;
@@ -206,7 +222,29 @@ interface MlOrder {
   }>;
 }
 
-async function upsertOrder(db: DB, o: MlOrder): Promise<void> {
+interface MlShipment {
+  id: number;
+  status?: string;
+  substatus?: string | null;
+  logistic_type?: string | null;
+  shipping_option?: { name?: string };
+  receiver_address?: {
+    address_line?: string | null;
+    street_name?: string | null;
+    street_number?: string | null;
+    city?: { name?: string | null } | null;
+    state?: { name?: string | null } | null;
+    municipality?: { name?: string | null } | null;
+    neighborhood?: { name?: string | null } | null;
+    comment?: string | null;
+    zip_code?: string | null;
+  } | null;
+}
+
+async function upsertOrder(
+  db: DB,
+  o: MlOrder,
+): Promise<{ id: string; shippingId: string | null }> {
   const { data: order, error } = await db
     .from("ml_orders")
     .upsert(
@@ -236,6 +274,86 @@ async function upsertOrder(db: DB, o: MlOrder): Promise<void> {
     precio_unitario: li.unit_price ?? null,
   }));
   if (items.length) await db.from("ml_order_items").insert(items);
+
+  const shippingId = o.shipping?.id != null ? String(o.shipping.id) : null;
+  return { id: order.id, shippingId };
+}
+
+// El tipo de logística (Flex / Mercado Envíos / Full) y el estado real del envío
+// no vienen en el pedido: hay que pedir el shipment aparte.
+export async function syncEnvio(
+  env: Env,
+  db: DB,
+  ref: { id: string; shippingId: string | null; status: string },
+): Promise<void> {
+  if (!ref.shippingId || ref.status !== "paid") return;
+  const res = await mlFetch(env, db, `/shipments/${ref.shippingId}`);
+  if (!res.ok) return; // envíos Full o sin permiso: se ignora en silencio
+  const s = (await res.json()) as MlShipment;
+  await db
+    .from("ml_orders")
+    .update({
+      logistic_type: s.logistic_type ?? null,
+      estado_envio: s.status ?? null,
+      envio_substatus: s.substatus ?? null,
+      envio_sync_at: new Date().toISOString(),
+    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .eq("id", ref.id);
+
+  // Flex: al pedido nuevo se le agrega una fila en la planilla de reparto.
+  if (s.logistic_type === "self_service") {
+    await registrarEnvioFlex(env, db, ref.id, s).catch((e) =>
+      console.error("[sheets] flex", (e as Error).message),
+    );
+  }
+}
+
+// Escribe el pedido Flex en la planilla "INDIGGO" (una sola vez, marcado con
+// ml_orders.sheet_synced_at). Va en el bloque del día en que se registra: la
+// planilla es la lista de reparto de hoy. Si el envío ya salió, no se agrega.
+async function registrarEnvioFlex(
+  env: Env,
+  db: DB,
+  orderId: string,
+  s: MlShipment,
+): Promise<void> {
+  if (!sheetsConfigurado(env)) return;
+  if (envioTerminado(s.status)) return; // despachado / entregado: no es reparto pendiente
+
+  const { data: row } = await db
+    .from("ml_orders")
+    .select("sheet_synced_at")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (!row || (row as { sheet_synced_at?: string }).sheet_synced_at) return;
+
+  const a = s.receiver_address ?? {};
+  const direccion = (
+    a.address_line ||
+    [a.street_name, a.street_number].filter((x) => x && x !== "SN").join(" ")
+  )?.trim();
+  const localidad = (
+    a.city?.name ||
+    a.municipality?.name ||
+    a.neighborhood?.name ||
+    a.state?.name ||
+    ""
+  )?.trim();
+  // sin datos de dirección todavía: se reintenta en el próximo sync
+  if (!direccion && !localidad) return;
+
+  await appendEnvioFlex(env, {
+    direccion: direccion || "",
+    localidad: localidad || "",
+    fechaAR: hoyAR(),
+  });
+
+  await db
+    .from("ml_orders")
+    .update({
+      sheet_synced_at: new Date().toISOString(),
+    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .eq("id", orderId);
 }
 
 /** Sincroniza un solo pedido (usado por el webhook de notificaciones). */
@@ -246,7 +364,9 @@ export async function syncOneOrder(
 ): Promise<void> {
   const res = await mlFetch(env, db, `/orders/${orderId}`);
   if (!res.ok) throw new Error(`GET /orders/${orderId} → ${res.status}`);
-  await upsertOrder(db, (await res.json()) as MlOrder);
+  const o = (await res.json()) as MlOrder;
+  const { id, shippingId } = await upsertOrder(db, o);
+  await syncEnvio(env, db, { id, shippingId, status: o.status }).catch(() => {});
 }
 
 async function syncPedidos(
@@ -260,6 +380,7 @@ async function syncPedidos(
     Date.now() - desdeDias * 24 * 3600 * 1000,
   ).toISOString();
   let total = 0;
+  const activos: Array<{ id: string; shippingId: string | null; status: string }> = [];
   for (let offset = 0; offset < 2000; offset += 50) {
     const qs = new URLSearchParams({
       seller: String(userId),
@@ -279,13 +400,25 @@ async function syncPedidos(
 
     for (const o of page.results) {
       try {
-        await upsertOrder(db, o);
+        const { id, shippingId } = await upsertOrder(db, o);
         total++;
+        const entregado = (o.tags ?? []).includes("delivered");
+        if (o.status === "paid" && shippingId && !entregado)
+          activos.push({ id, shippingId, status: o.status });
       } catch (e) {
         errores.push((e as Error).message);
       }
     }
     if (offset + 50 >= (page.paging?.total ?? 0)) break;
+  }
+
+  // Estado y logística del envío para los pedidos que siguen vivos (de a 5).
+  for (let i = 0; i < activos.length; i += 5) {
+    await Promise.all(
+      activos.slice(i, i + 5).map((ref) =>
+        seguro(errores, `envio ${ref.shippingId}`, () => syncEnvio(env, db, ref)),
+      ),
+    );
   }
   return total;
 }
@@ -326,6 +459,13 @@ export async function syncAll(env: Env, db: DB): Promise<SyncResult> {
     .from("integrations")
     .update({ meta: meta as Json })
     .eq("provider", "mercadolibre");
+
+  // Mantener el catálogo interno + la lista de materiales al día con ML (nuevos
+  // productos/variantes, publicaciones agrupadas, tiempos de placa). Idempotente.
+  await seguro(errores, "catálogo", async () => {
+    await derivarCatalogo(db);
+    await derivarBOM(db);
+  });
 
   await regenerarAlertas(db).catch((e) =>
     errores.push(`alertas: ${(e as Error).message}`),

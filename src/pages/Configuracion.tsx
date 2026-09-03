@@ -30,6 +30,8 @@ export function Configuracion() {
       />
       <div className="flex flex-col gap-8">
         <MercadoLibreSection />
+        <FlexSection />
+        <PlanillaRepartoSection />
         <CatalogoSection />
         <UnirPublicacionesSection />
         <GruposSection />
@@ -171,6 +173,250 @@ function MercadoLibreSection() {
   );
 }
 
+interface FlexEstado {
+  oculto: boolean;
+  desde: string | null;
+  con_flex: number;
+  activas: number;
+}
+
+function FlexSection() {
+  const { data, loading, reload } = useApi<FlexEstado>("/ml/flex");
+  const [confirmar, setConfirmar] = useState(false);
+  const [corriendo, setCorriendo] = useState(false);
+  const [msg, setMsg] = useState<string>();
+
+  const ocultar = !data?.oculto; // si hoy está visible, la acción es ocultar
+
+  async function ejecutar() {
+    setCorriendo(true);
+    setMsg(undefined);
+    try {
+      const r = await api<{ tocados: number; pendientes: number; errores: string[] }>(
+        "/ml/flex",
+        { method: "POST", body: JSON.stringify({ ocultar }) },
+      );
+      setMsg(
+        `${r.tocados} publicación(es) actualizada(s)` +
+          (r.errores.length ? ` · ${r.errores.length} con error` : ""),
+      );
+      setConfirmar(false);
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setCorriendo(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Envío Flex</h2>
+      <Card>
+        {loading && <div className="text-[13.5px] text-ink/50">Cargando…</div>}
+        {data && (
+          <div className="flex flex-col gap-4">
+            <p className="max-w-prose text-[13.5px] text-ink/55">
+              Saca (o vuelve a poner) <b>Envío Flex</b> como opción de envío en{" "}
+              <b>todas</b> tus publicaciones activas, de una. No desactiva Flex en
+              tu cuenta — sólo deja de ofrecerse a los compradores hasta que lo
+              vuelvas a activar acá.
+            </p>
+            <p className="max-w-prose rounded-[10px] bg-warn-bg px-3 py-2 text-[12px] text-warn">
+              Ojo: Mercado Libre sólo deja hacer esto por API si la app tiene el
+              permiso del producto <b>“Mercado Envíos Flex”</b> (se pide una vez en
+              developers.mercadolibre.com.ar). Si el botón da error de permiso, todavía
+              falta ese paso. Alternativa inmediata: pausar Flex desde el panel de{" "}
+              <a
+                href="https://envios.mercadolibre.com.ar/flex"
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold underline"
+              >
+                Mercado Envíos Flex
+              </a>{" "}
+              de tu cuenta.
+            </p>
+
+            <div className="flex items-center gap-2.5 text-[13px]">
+              <span
+                className={
+                  "inline-block h-2.5 w-2.5 rounded-full " +
+                  (data.oculto ? "bg-warn" : "bg-ok")
+                }
+              />
+              {data.oculto ? (
+                <span>
+                  Flex <b>oculto</b>
+                  {data.desde &&
+                    ` desde el ${new Date(data.desde).toLocaleDateString("es-AR")}`}
+                  {data.con_flex > 0 &&
+                    ` · ${data.con_flex} publicación(es) todavía lo tienen`}
+                </span>
+              ) : (
+                <span>
+                  Flex <b>visible</b> en {data.con_flex} de {data.activas}{" "}
+                  publicaciones
+                </span>
+              )}
+            </div>
+
+            {msg && <div className="text-[12.5px] text-ink/60">{msg}</div>}
+
+            {!confirmar ? (
+              <div>
+                <button
+                  onClick={() => {
+                    setConfirmar(true);
+                    setMsg(undefined);
+                  }}
+                  className={
+                    "rounded-[9px] px-4 py-2.5 text-[13.5px] font-bold text-white " +
+                    (ocultar
+                      ? "bg-warn hover:opacity-90"
+                      : "bg-accent hover:bg-accent-hover")
+                  }
+                >
+                  {ocultar
+                    ? "Ocultar Flex de todas las publicaciones"
+                    : "Volver a mostrar Flex en todas"}
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2.5 rounded-[10px] bg-ink/[0.03] p-3">
+                <span className="text-[13px] font-semibold">
+                  {ocultar
+                    ? `¿Ocultar Flex de ${data.con_flex} publicación(es)?`
+                    : `¿Volver a mostrar Flex en ${data.activas - data.con_flex} publicación(es)?`}
+                </span>
+                <button
+                  onClick={ejecutar}
+                  disabled={corriendo}
+                  className={
+                    "rounded-[9px] px-4 py-2 text-[13px] font-bold text-white disabled:opacity-50 " +
+                    (ocultar ? "bg-warn" : "bg-accent")
+                  }
+                >
+                  {corriendo ? "Aplicando…" : "Sí, confirmar"}
+                </button>
+                <button
+                  onClick={() => setConfirmar(false)}
+                  disabled={corriendo}
+                  className="rounded-[9px] border border-ink/12 px-4 py-2 text-[13px] font-semibold text-ink/60"
+                >
+                  Cancelar
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
+interface PlanillaEstado {
+  configurado: boolean;
+  sheet_url: string | null;
+  escritos_total: number;
+  pendientes: number;
+  ultimo: string | null;
+}
+
+function PlanillaRepartoSection() {
+  const { data, loading, reload } = useApi<PlanillaEstado>("/pedidos/planilla");
+  const [corriendo, setCorriendo] = useState(false);
+  const [msg, setMsg] = useState<string>();
+
+  async function sincronizar() {
+    setCorriendo(true);
+    setMsg(undefined);
+    try {
+      const r = await api<{
+        escritos: number;
+        revisados: number;
+        errores: string[];
+      }>("/pedidos/planilla/sync", { method: "POST" });
+      setMsg(
+        `${r.escritos} pedido(s) Flex escritos en la planilla` +
+          (r.errores.length ? ` · ${r.errores.length} con error` : ""),
+      );
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setCorriendo(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Planilla de reparto</h2>
+      <Card>
+        {loading && <div className="text-[13.5px] text-ink/50">Cargando…</div>}
+        {data && (
+          <div className="flex flex-col gap-4">
+            <p className="max-w-prose text-[13.5px] text-ink/55">
+              Cada pedido <b>Flex</b> que entra pagado se agrega solo como una
+              fila en la planilla{" "}
+              {data.sheet_url ? (
+                <a
+                  href={data.sheet_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-semibold underline"
+                >
+                  INDIGGO
+                </a>
+              ) : (
+                <b>INDIGGO</b>
+              )}{" "}
+              (bloque del día: dirección, localidad y CHICO/MEDIANO tildado).
+            </p>
+
+            {!data.configurado && (
+              <p className="max-w-prose rounded-[10px] bg-warn-bg px-3 py-2 text-[12px] text-warn">
+                Falta cargar el Service Account de Google
+                (<code>GOOGLE_SA_EMAIL</code> y <code>GOOGLE_SA_PRIVATE_KEY</code>).
+                Hasta entonces no se escribe nada.
+              </p>
+            )}
+
+            <div className="flex items-center gap-2.5 text-[13px]">
+              <span
+                className={
+                  "inline-block h-2.5 w-2.5 rounded-full " +
+                  (data.configurado ? "bg-ok" : "bg-warn")
+                }
+              />
+              <span>
+                {data.escritos_total} pedido(s) escritos
+                {data.pendientes > 0 && ` · ${data.pendientes} pendiente(s)`}
+                {data.ultimo &&
+                  ` · último ${new Date(data.ultimo).toLocaleString("es-AR")}`}
+              </span>
+            </div>
+
+            {msg && <div className="text-[12.5px] text-ink/60">{msg}</div>}
+
+            <div>
+              <button
+                onClick={sincronizar}
+                disabled={corriendo || !data.configurado}
+                className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                {corriendo
+                  ? "Sincronizando…"
+                  : "Sincronizar pedidos Flex de hoy"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 function Mini({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -224,10 +470,11 @@ function CatalogoSection() {
         cuerpos: number;
         llaveros: number;
         photocards: number;
+        packs: number;
         vinculos: number;
       }>("/catalogo/derivar-bom", { method: "POST" });
       setBomMsg(
-        `${r.cuerpos} cuerpos 3D + ${r.llaveros} llaveros 3D + ${r.photocards} photocards, ${r.vinculos} vínculos`,
+        `${r.cuerpos} cuerpos 3D + ${r.llaveros} llaveros 3D + ${r.photocards} photocards + ${r.packs} packs, ${r.vinculos} vínculos`,
       );
       reload();
     } catch (e) {

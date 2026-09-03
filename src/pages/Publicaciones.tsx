@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Card,
@@ -12,6 +12,24 @@ import { api, useApi } from "@/lib/api";
 import { formatARS } from "@/lib/format";
 import type { EstadoTono } from "@/lib/types";
 
+interface CategoriaCand {
+  id: string;
+  nombre: string;
+  path: string;
+  usos?: number;
+  fuente?: "propia" | "ml";
+}
+interface CategoriaAnalisis {
+  actual_id: string;
+  actual_path: string;
+  sugerida_id: string;
+  sugerida_path: string;
+  coincide: boolean;
+  confianza: "alta" | "media" | "baja";
+  motivo: string;
+  candidatas: CategoriaCand[];
+  chequeado_at: string;
+}
 interface PublicacionApi {
   id: string;
   ml_item_id: string;
@@ -23,6 +41,9 @@ interface PublicacionApi {
   thumbnail: string | null;
   variantes: number;
   stock_ml: number;
+  categoria_sugerida: string | null;
+  categoria_analisis: CategoriaAnalisis | null;
+  reemplazada_por: string | null;
 }
 interface Resp {
   publicaciones: PublicacionApi[];
@@ -50,7 +71,8 @@ export function Publicaciones() {
   const [busqueda, setBusqueda] = useState("");
   const qs = useMemo(() => {
     const p = new URLSearchParams();
-    if (filtro !== "todas") p.set("estado", filtro);
+    // "categoria" no es un estado de ML: traemos todas y filtramos en el cliente
+    if (filtro !== "todas" && filtro !== "categoria") p.set("estado", filtro);
     if (busqueda.trim()) p.set("q", busqueda.trim());
     return p.toString();
   }, [filtro, busqueda]);
@@ -59,8 +81,41 @@ export function Publicaciones() {
     `/publicaciones${qs ? `?${qs}` : ""}`,
   );
   const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
+  const [catPara, setCatPara] = useState<PublicacionApi | null>(null);
   const [nueva, setNueva] = useState(false);
   const [precios, setPrecios] = useState(false);
+  const [analizando, setAnalizando] = useState(false);
+  const [analisisMsg, setAnalisisMsg] = useState<string>();
+
+  async function analizarCategorias() {
+    setAnalizando(true);
+    setAnalisisMsg(undefined);
+    try {
+      const r = await api<{
+        analizadas: number;
+        grupos?: number;
+        con_problema: number;
+        ok: number;
+        errores: string[];
+      }>("/seo/analizar", { method: "POST" });
+      setAnalisisMsg(
+        `${r.analizadas} publicaciones en ${r.grupos ?? "?"} grupos · ${r.con_problema} para revisar · ${r.ok} OK` +
+          (r.errores.length ? ` · ${r.errores.length} errores` : ""),
+      );
+      if (r.con_problema > 0) setFiltro("categoria");
+      reload();
+    } catch (e) {
+      setAnalisisMsg((e as Error).message);
+    } finally {
+      setAnalizando(false);
+    }
+  }
+
+  const problemas = (data?.publicaciones ?? []).filter(
+    (p) => p.categoria_analisis && !p.categoria_analisis.coincide,
+  );
+  const publicacionesVisibles =
+    filtro === "categoria" ? problemas : (data?.publicaciones ?? []);
 
   return (
     <div>
@@ -92,6 +147,13 @@ export function Publicaciones() {
           }}
         />
       )}
+      {catPara && (
+        <CategoriaModal
+          publicacion={catPara}
+          onClose={() => setCatPara(null)}
+          onHecho={() => reload()}
+        />
+      )}
       <PageHeader
         titulo="Publicaciones"
         subtitulo={
@@ -101,6 +163,9 @@ export function Publicaciones() {
         }
         acciones={
           <>
+            <GhostButton onClick={analizarCategorias}>
+              {analizando ? "Analizando…" : "Analizar categorías"}
+            </GhostButton>
             <GhostButton onClick={() => setPrecios(true)}>
               Editar precios
             </GhostButton>
@@ -110,6 +175,12 @@ export function Publicaciones() {
           </>
         }
       />
+
+      {analisisMsg && (
+        <div className="mb-4 rounded-[12px] bg-accent-soft px-4 py-2.5 text-[12.5px] text-accent">
+          {analisisMsg}
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {FILTROS.map((f) => (
@@ -129,6 +200,22 @@ export function Publicaciones() {
             )}
           </button>
         ))}
+        {(filtro === "categoria" || problemas.length > 0) && (
+          <button
+            onClick={() => setFiltro("categoria")}
+            className={cx(
+              "rounded-lg px-3.5 py-2 text-[13px] font-semibold transition-colors",
+              filtro === "categoria"
+                ? "bg-danger-bg text-danger"
+                : "text-danger/70 hover:bg-danger-bg/60",
+            )}
+          >
+            Revisar categoría
+            {problemas.length > 0 && (
+              <span className="ml-1.5 opacity-60">{problemas.length}</span>
+            )}
+          </button>
+        )}
         <input
           value={busqueda}
           onChange={(e) => setBusqueda(e.target.value)}
@@ -142,11 +229,12 @@ export function Publicaciones() {
 
       {data && (
         <Card padding={false} className="overflow-hidden">
-          {data.publicaciones.map((p) => {
+          {publicacionesVisibles.map((p) => {
             const meta = ESTADO_META[p.estado] ?? {
               label: p.estado,
               tono: "neutral" as EstadoTono,
             };
+            const cat = p.categoria_analisis;
             return (
               <div
                 key={p.id}
@@ -170,6 +258,25 @@ export function Publicaciones() {
                     Stock ML: {p.stock_ml}
                     {p.variantes > 0 && ` · ${p.variantes} variantes`}
                   </div>
+                  {p.reemplazada_por ? (
+                    <div className="mt-1 text-[11.5px] text-ink/40">
+                      → re-publicada en otra categoría ({p.reemplazada_por})
+                    </div>
+                  ) : cat && !cat.coincide ? (
+                    <button
+                      onClick={() => setCatPara(p)}
+                      className="mt-1 flex flex-wrap items-center gap-1.5 text-left text-[11.5px] text-danger hover:underline"
+                    >
+                      <Badge tono="danger">Revisar categoría</Badge>
+                      <span className="text-ink/45">
+                        {cat.actual_path} → <b>{cat.sugerida_path}</b>
+                      </span>
+                    </button>
+                  ) : cat && cat.coincide ? (
+                    <div className="mt-1 text-[11.5px] text-ink/35">
+                      Categoría OK · {cat.actual_path}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="hidden w-24 shrink-0 text-right text-[14px] font-bold sm:block">
                   {p.precio != null ? formatARS(p.precio) : "—"}
@@ -194,9 +301,11 @@ export function Publicaciones() {
               </div>
             );
           })}
-          {data.publicaciones.length === 0 && (
+          {publicacionesVisibles.length === 0 && (
             <div className="px-4 py-8 text-center text-[13.5px] text-ink/45">
-              No hay publicaciones con este filtro.
+              {filtro === "categoria"
+                ? "No hay publicaciones con la categoría marcada como incorrecta. Corré “Analizar categorías”."
+                : "No hay publicaciones con este filtro."}
             </div>
           )}
         </Card>
@@ -802,6 +911,379 @@ function PreciosModal({
               : `Aplicar ${cambios.length || ""} a Mercado Libre`}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+interface PlanResp {
+  categoria_actual: { id: string; path: string };
+  categoria_nueva: { id: string; path: string };
+  atributos_faltantes: Array<{ id: string; nombre: string; valores: string[] }>;
+  preview: {
+    titulo: string;
+    precio: number | null;
+    moneda: string;
+    listing_type_id: string;
+    condicion: string;
+    fotos: number;
+    variaciones: number;
+    atributos: number;
+  };
+}
+interface RepubResp {
+  nuevo_item_id: string;
+  permalink: string | null;
+  cerrada_vieja: boolean;
+  avisos: string[];
+}
+
+function CategoriaModal({
+  publicacion,
+  onClose,
+  onHecho,
+}: {
+  publicacion: PublicacionApi;
+  onClose: () => void;
+  onHecho: () => void;
+}) {
+  const analisis = publicacion.categoria_analisis;
+  const [catId, setCatId] = useState(
+    analisis?.sugerida_id ?? analisis?.actual_id ?? "",
+  );
+  const [otra, setOtra] = useState("");
+  const [plan, setPlan] = useState<PlanResp>();
+  const [cargandoPlan, setCargandoPlan] = useState(false);
+  const [attrs, setAttrs] = useState<Record<string, string>>({});
+  const [err, setErr] = useState<string>();
+  const [ejecutando, setEjecutando] = useState(false);
+  const [resultado, setResultado] = useState<RepubResp>();
+
+  const [busq, setBusq] = useState("");
+  const [buscando, setBuscando] = useState(false);
+  const [extra, setExtra] = useState<CategoriaCand[]>([]); // resultados de búsqueda + "mis categorías"
+
+  async function buscarCat(q: string) {
+    setBuscando(true);
+    try {
+      const r = await api<{ resultados: CategoriaCand[] }>(
+        `/seo/categorias?q=${encodeURIComponent(q)}`,
+      );
+      setExtra(r.resultados.map((x) => ({ ...x, fuente: "ml" as const })));
+    } catch {
+      setExtra([]);
+    } finally {
+      setBuscando(false);
+    }
+  }
+
+  async function verMisCategorias() {
+    setBuscando(true);
+    try {
+      const r = await api<{ propias: CategoriaCand[] }>("/seo/categorias");
+      setExtra(r.propias.map((x) => ({ ...x, fuente: "propia" as const })));
+    } catch {
+      setExtra([]);
+    } finally {
+      setBuscando(false);
+    }
+  }
+
+  const candBase = analisis?.candidatas ?? [];
+  const candidatas: CategoriaCand[] = [
+    ...candBase,
+    ...extra.filter((e) => !candBase.some((b) => b.id === e.id)),
+  ];
+
+  const objetivo = otra.trim() || catId;
+
+  useEffect(() => {
+    let vivo = true;
+    setCargandoPlan(true);
+    setErr(undefined);
+    const t = setTimeout(() => {
+      api<PlanResp>(`/seo/publicacion/${publicacion.id}/plan`, {
+        method: "POST",
+        body: JSON.stringify({ categoria_id: objetivo || undefined }),
+      })
+        .then((r) => {
+          if (!vivo) return;
+          setPlan(r);
+          setAttrs({});
+        })
+        .catch((e: Error) => vivo && setErr(e.message))
+        .finally(() => vivo && setCargandoPlan(false));
+    }, 500);
+    return () => {
+      vivo = false;
+      clearTimeout(t);
+    };
+  }, [publicacion.id, objetivo]);
+
+  const faltanAttrs =
+    plan?.atributos_faltantes.some((a) => !(attrs[a.id] ?? "").trim()) ?? false;
+  const tieneVariantes = (plan?.preview.variaciones ?? 0) > 0;
+
+  async function republicar() {
+    if (
+      !window.confirm(
+        "Se va a CREAR una publicación nueva EN PAUSA en la categoría elegida y CERRAR la actual en Mercado Libre. La nueva pierde historial, preguntas y posición de búsqueda. ¿Confirmás?",
+      )
+    )
+      return;
+    setEjecutando(true);
+    setErr(undefined);
+    try {
+      const r = await api<RepubResp>(
+        `/seo/publicacion/${publicacion.id}/republicar`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            categoria_id: plan?.categoria_nueva.id ?? objetivo,
+            atributos_extra: Object.entries(attrs)
+              .filter(([, v]) => v.trim())
+              .map(([id, value_name]) => ({ id, value_name: value_name.trim() })),
+          }),
+        },
+      );
+      setResultado(r);
+      onHecho();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setEjecutando(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
+      <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <h2 className="text-[16px] font-semibold">Mover a la categoría correcta</h2>
+          <button
+            onClick={onClose}
+            className="text-[18px] font-bold text-ink/40 hover:text-ink"
+          >
+            ×
+          </button>
+        </div>
+        <p className="mb-4 text-[12.5px] text-ink/50">{publicacion.titulo}</p>
+
+        {resultado ? (
+          <div className="flex flex-col gap-3 text-[13.5px]">
+            <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
+              Publicación nueva creada <b>en pausa</b> (#{resultado.nuevo_item_id}).
+              {resultado.cerrada_vieja
+                ? " La vieja quedó cerrada."
+                : " Ojo: la vieja NO se pudo cerrar, hacelo a mano."}
+            </div>
+            {resultado.permalink && (
+              <a
+                href={resultado.permalink}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-accent"
+              >
+                Abrir la nueva en Mercado Libre →
+              </a>
+            )}
+            {resultado.avisos.length > 0 && (
+              <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
+                {resultado.avisos.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[12px] text-ink/45">
+              Revisá la nueva en Mercado Libre y activala cuando esté OK. Después
+              corré Configuración → Catálogo → “Derivar” si tocaste holders.
+            </p>
+            <PrimaryButton onClick={onClose}>Cerrar</PrimaryButton>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {analisis && (
+              <div className="rounded-lg bg-ink/[0.03] px-3 py-2.5 text-[12.5px] text-ink/70">
+                <div className="mb-1">
+                  <b>Ahora:</b> {analisis.actual_path}
+                </div>
+                <div className="text-ink/55">
+                  {analisis.motivo} · confianza {analisis.confianza}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-[12.5px] text-ink/50">Categoría nueva</span>
+                <button
+                  onClick={verMisCategorias}
+                  className="text-[12px] font-semibold text-accent hover:text-accent-hover"
+                >
+                  ver todas las que uso
+                </button>
+              </div>
+              <div className="flex max-h-[240px] flex-col gap-0.5 overflow-y-auto rounded-lg border border-ink/10 p-1">
+                {candidatas.map((cand) => (
+                  <label
+                    key={cand.id}
+                    className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-[12.5px] hover:bg-ink/[0.03]"
+                  >
+                    <input
+                      type="radio"
+                      className="mt-0.5"
+                      checked={!otra.trim() && catId === cand.id}
+                      onChange={() => {
+                        setOtra("");
+                        setCatId(cand.id);
+                      }}
+                    />
+                    <span className="min-w-0">
+                      {cand.fuente === "propia" && (
+                        <span className="mr-1.5 rounded bg-accent-soft px-1 py-0.5 text-[10px] font-bold text-accent">
+                          {cand.usos ? `usás ×${cand.usos}` : "la usás"}
+                        </span>
+                      )}
+                      {cand.path}{" "}
+                      <span className="text-ink/35">({cand.id})</span>
+                    </span>
+                  </label>
+                ))}
+                {candidatas.length === 0 && (
+                  <div className="px-2 py-1.5 text-[12px] text-ink/40">
+                    Sin candidatas. Buscá abajo.
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  value={busq}
+                  onChange={(e) => setBusq(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && busq.trim()) buscarCat(busq.trim());
+                  }}
+                  placeholder="Buscar otra categoría (ej: mostacillas)"
+                  className="min-w-0 flex-1 rounded border border-ink/12 px-2.5 py-1.5 text-[12.5px] outline-none focus:border-accent"
+                />
+                <button
+                  onClick={() => busq.trim() && buscarCat(busq.trim())}
+                  disabled={buscando}
+                  className="rounded bg-accent-soft px-2.5 py-1.5 text-[12px] font-semibold text-accent disabled:opacity-50"
+                >
+                  {buscando ? "…" : "Buscar"}
+                </button>
+              </div>
+
+              <label className="mt-1.5 flex items-center gap-2 px-1 text-[12px] text-ink/55">
+                <input
+                  type="radio"
+                  checked={!!otra.trim()}
+                  onChange={() => setOtra(analisis?.actual_id ?? "MLA")}
+                />
+                <span>Pegar ID a mano:</span>
+                <input
+                  value={otra}
+                  onChange={(e) => setOtra(e.target.value)}
+                  placeholder="MLA…"
+                  className="w-32 rounded border border-ink/12 px-2 py-1 outline-none focus:border-accent"
+                />
+              </label>
+            </div>
+
+            {cargandoPlan && (
+              <div className="text-[12.5px] text-ink/40">Calculando…</div>
+            )}
+
+            {plan && !cargandoPlan && (
+              <>
+                <div className="rounded-lg border border-ink/10 px-3 py-2.5 text-[12.5px]">
+                  <div className="mb-1 font-semibold text-ink/70">
+                    Se va a re-crear con:
+                  </div>
+                  <div className="text-ink/60">
+                    {plan.categoria_nueva.path}{" "}
+                    <span className="text-ink/35">
+                      ({plan.categoria_nueva.id})
+                    </span>
+                  </div>
+                  <div className="mt-1 text-ink/45">
+                    {plan.preview.fotos} fotos · {plan.preview.variaciones}{" "}
+                    variaciones · {plan.preview.atributos} atributos ·{" "}
+                    {plan.preview.listing_type_id}
+                  </div>
+                </div>
+
+                {plan.atributos_faltantes.length > 0 && (
+                  <div>
+                    <div className="mb-1.5 text-[12.5px] text-ink/50">
+                      La categoría nueva pide estos atributos (obligatorios)
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {plan.atributos_faltantes.map((a) => (
+                        <label key={a.id} className="flex flex-col gap-1">
+                          <span className="text-[12px] text-ink/50">
+                            {a.nombre}
+                          </span>
+                          <input
+                            value={attrs[a.id] ?? ""}
+                            onChange={(e) =>
+                              setAttrs((s) => ({ ...s, [a.id]: e.target.value }))
+                            }
+                            list={`vals-${a.id}`}
+                            className="rounded border border-ink/12 px-2 py-1.5 text-[12.5px] outline-none focus:border-accent"
+                          />
+                          {a.valores.length > 0 && (
+                            <datalist id={`vals-${a.id}`}>
+                              {a.valores.map((v) => (
+                                <option key={v} value={v} />
+                              ))}
+                            </datalist>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+
+            {tieneVariantes ? (
+              <div className="rounded-lg bg-danger-bg px-3 py-2 text-[12px] text-danger">
+                Esta publicación tiene <b>{plan?.preview.variaciones} variantes</b>.
+                Mercado Libre cambió el modelo de publicación (User Products) y
+                recrearlas por API rompería el stock del catálogo. Cambiale la
+                categoría <b>desde la web de Mercado Libre</b> (Editar → mover /
+                re-publicar).
+              </div>
+            ) : (
+              <div className="rounded-lg bg-warn-bg px-3 py-2 text-[12px] text-warn">
+                Crea una publicación nueva (en pausa) y cierra la actual. La nueva
+                arranca sin historial, preguntas ni posición de búsqueda. El
+                título y el envío los define Mercado Libre — revisalos.
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-3 border-t hairline pt-4">
+              <button
+                onClick={republicar}
+                disabled={
+                  ejecutando ||
+                  cargandoPlan ||
+                  !plan ||
+                  faltanAttrs ||
+                  tieneVariantes
+                }
+                className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                {ejecutando ? "Re-publicando…" : "Re-publicar en esta categoría"}
+              </button>
+              <GhostButton onClick={onClose}>Cancelar</GhostButton>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { claude, mensajeConImagenes, parseJsonLaxo } from "../lib/claude";
+import { costoUsd, generarImagen } from "../lib/kie";
 import { mlFetch } from "../lib/ml";
 import { syncOneItem } from "../lib/sync";
 import { derivarCatalogo } from "../lib/derivar";
@@ -307,6 +308,7 @@ interface PublicarBody {
   stock?: number;
   imagenes?: string[];
   atributos?: Array<{ id: string; value_name: string }>;
+  family_name?: string;
   variantes?: {
     atributo_id?: string;
     atributo_nombre?: string;
@@ -342,9 +344,13 @@ ia.post("/publicar", async (c) => {
     ...variantesRaw.flatMap((v) => (v.imagenes ?? []).filter(Boolean)),
   ];
   const poolUnico = [...new Set(poolFotos)].slice(0, 12);
+  if (!poolUnico.length) return c.json({ error: "Cargá al menos una foto antes de publicar." }, 400);
+  if (!Number.isFinite(body.precio) || body.precio <= 0) return c.json({ error: "Ingresá un precio mayor a cero." }, 400);
 
+  const familyName = body.family_name?.trim();
+  // En User Products, ML genera title desde family_name y atributos.
   const item: Record<string, unknown> = {
-    title: body.titulo.slice(0, 60),
+    ...(familyName ? {} : { title: body.titulo.slice(0, 60) }),
     category_id: body.categoria_id,
     currency_id: "ARS",
     buying_mode: "buy_it_now",
@@ -352,6 +358,7 @@ ia.post("/publicar", async (c) => {
     listing_type_id: "gold_special",
     pictures: poolUnico.map((source) => ({ source })),
     attributes: atributos,
+    ...(familyName ? { family_name: familyName } : {}),
   };
 
   const avisos: string[] = [];
@@ -398,23 +405,30 @@ ia.post("/publicar", async (c) => {
         .filter(Boolean)
         .join(" · ") ||
       creado.message ||
-      JSON.stringify(creado);
-    return c.json({ error: detalle.slice(0, 600) }, 502);
+      "error desconocido";
+    // ML a veces devuelve un código genérico ("body.invalid_fields") sin
+    // detalle en cause[]: sumamos siempre el JSON crudo para no perder pistas.
+    return c.json(
+      { error: `${detalle} — ${JSON.stringify(creado)}`.slice(0, 900) },
+      502,
+    );
   }
 
-  // pausar + descripción
-  await mlFetch(c.env, db, `/items/${creado.id}`, {
+  // Confirmar la pausa antes de informar el resultado.
+  const pausa = await mlFetch(c.env, db, `/items/${creado.id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ status: "paused" }),
-  });
+  }).catch(() => null);
+  if (!pausa?.ok) avisos.push("La publicación fue creada, pero Mercado Libre no confirmó la pausa. Revisá su estado desde el enlace antes de continuar.");
+
   if (body.descripcion?.trim()) {
     const rd = await mlFetch(c.env, db, `/items/${creado.id}/description`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ plain_text: body.descripcion.trim() }),
-    });
-    if (!rd.ok) avisos.push("No se pudo guardar la descripción; cargala a mano.");
+    }).catch(() => null);
+    if (!rd?.ok) avisos.push("No se pudo guardar la descripción; cargala a mano.");
   }
 
   try {
@@ -427,6 +441,7 @@ ia.post("/publicar", async (c) => {
   return c.json({
     ml_item_id: creado.id,
     permalink: creado.permalink ?? null,
+    pausada: pausa?.ok ?? false,
     variantes: conVariantes ? variantesRaw.length : 0,
     avisos,
   });
@@ -482,4 +497,464 @@ ia.post("/publicacion/:id/aplicar", async (c) => {
   }
 
   return c.json({ aplicado, errores }, errores.length && !aplicado.length ? 502 : 200);
+});
+
+// ---------------------------------------------------------------------------
+// Agregar variantes nuevas (ej. un color más) a una publicación EXISTENTE:
+// la IA propone una foto por color recoloreando las fotos actuales; Elias
+// revisa/reemplaza y recién ahí se manda a Mercado Libre.
+// ---------------------------------------------------------------------------
+
+interface MlPictureRaw {
+  id: string;
+  url?: string;
+  secure_url?: string;
+}
+interface MlAttrCombo {
+  id?: string;
+  name?: string;
+  value_id?: string | null;
+  value_name?: string;
+}
+interface MlVariationRaw {
+  id: number | string;
+  price: number | null;
+  available_quantity: number | null;
+  attribute_combinations?: MlAttrCombo[];
+  picture_ids?: string[];
+}
+interface MlAttributeRaw {
+  id?: string;
+  name?: string;
+  value_id?: string | null;
+  value_name?: string | null;
+}
+interface MlItemFull {
+  id: string;
+  price: number | null;
+  pictures?: MlPictureRaw[];
+  variations?: MlVariationRaw[];
+  family_name?: string | null;
+  category_id?: string;
+  attributes?: MlAttributeRaw[];
+  title?: string;
+}
+
+// Baja la imagen temporal de kie.ai (~24 h) y la deja permanente en el mismo
+// bucket que usa la subida manual de fotos (/ia/imagen).
+async function guardarFotoVariante(
+  db: ReturnType<typeof supa>,
+  url: string,
+): Promise<string> {
+  try {
+    const res = await fetch(url);
+    const bytes = await res.arrayBuffer();
+    const mes = new Date().toISOString().slice(0, 7);
+    const path = `${mes}/variante-${crypto.randomUUID()}.png`;
+    const up = await db.storage
+      .from("publicaciones")
+      .upload(path, bytes, { contentType: "image/png", upsert: false });
+    if (!up.error)
+      return db.storage.from("publicaciones").getPublicUrl(path).data.publicUrl;
+  } catch {
+    /* fallback abajo */
+  }
+  return url;
+}
+
+// Propone una foto por cada color/valor nuevo, recoloreando las fotos
+// actuales del producto. No toca Mercado Libre.
+ia.post("/publicacion/:id/variantes/proponer", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ valores?: string[]; generar_fotos?: boolean }>()
+    .catch(() => ({}) as { valores?: string[]; generar_fotos?: boolean });
+  const valores = [...new Set((body.valores ?? []).map((v) => v.trim()).filter(Boolean))].slice(
+    0,
+    6,
+  );
+  if (valores.length === 0)
+    return c.json({ error: "indicá al menos un color/valor nuevo" }, 400);
+  const generarFotos = body.generar_fotos === true;
+
+  const db = supa(c.env);
+  const { data: l, error } = await db
+    .from("ml_listings")
+    .select("raw")
+    .eq("id", id)
+    .single();
+  if (error || !l) return c.json({ error: "publicación no encontrada" }, 404);
+
+  const raw = (l.raw ?? {}) as unknown as MlItemFull;
+  if (raw.family_name)
+    return c.json(
+      {
+        error:
+          `Esta publicación pertenece a una "familia de producto" de Mercado Libre ` +
+          `(family_name: "${raw.family_name}"), y ML no permite agregar variantes por API ` +
+          `a ese tipo de ítem. Hay que crear el color nuevo como una publicación aparte ` +
+          `(con "Crear con IA") o agregarlo a mano desde el sitio de ML.`,
+      },
+      409,
+    );
+  const comboActual = raw.variations?.[0]?.attribute_combinations?.[0];
+  const atributoId = comboActual?.id ?? null;
+  const atributoNombre = comboActual?.name ?? null;
+
+  // modo "ya tengo las fotos": no genera nada, sólo confirma el atributo de
+  // variación para que Elias suba las fotos a mano en el paso siguiente.
+  if (!generarFotos) {
+    return c.json({
+      atributo_id: atributoId,
+      atributo_nombre: atributoNombre,
+      propuestas: valores.map((valor) => ({ valor, imagen_url: null })),
+      costo_usd_estimado: 0,
+    });
+  }
+
+  const referencias = (raw.pictures ?? [])
+    .slice(0, 3)
+    .map((p) => p.secure_url ?? p.url)
+    .filter((u): u is string => Boolean(u));
+  if (referencias.length === 0)
+    return c.json({ error: "la publicación no tiene fotos para usar de referencia" }, 400);
+
+  const propuestas = await Promise.all(
+    valores.map(async (valor) => {
+      try {
+        const { url, model } = await generarImagen(c.env, {
+          prompt: `Cambiá el color del producto a "${valor}" manteniendo exactamente la
+misma pose, ángulo, encuadre, fondo e iluminación. No cambies nada más del producto.`,
+          imageUrls: referencias,
+          model: "google/nano-banana-edit",
+        });
+        const imagen_url = await guardarFotoVariante(db, url);
+        return { valor, imagen_url, modelo: model };
+      } catch (e) {
+        return { valor, imagen_url: null, error: (e as Error).message };
+      }
+    }),
+  );
+
+  return c.json({
+    atributo_id: atributoId,
+    atributo_nombre: atributoNombre,
+    propuestas,
+    costo_usd_estimado: valores.length * costoUsd("google/nano-banana-edit"),
+  });
+});
+
+interface AplicarVariantesBody {
+  atributo_id?: string;
+  atributo_nombre?: string;
+  items?: Array<{
+    value_name: string;
+    imagenes?: string[];
+    stock?: number;
+    precio?: number;
+  }>;
+}
+
+// Manda las variantes nuevas a Mercado Libre en un único PUT (fotos +
+// variaciones), sin tocar las que ya existían. Se llama SÓLO al confirmar.
+ia.post("/publicacion/:id/variantes/aplicar", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json<AplicarVariantesBody>();
+  const items = (body.items ?? []).filter((it) => it.value_name?.trim());
+  if (items.length === 0)
+    return c.json({ error: "no hay ninguna variante para agregar" }, 400);
+
+  const db = supa(c.env);
+  const { data: l, error } = await db
+    .from("ml_listings")
+    .select("ml_item_id")
+    .eq("id", id)
+    .single();
+  if (error || !l) return c.json({ error: "publicación no encontrada" }, 404);
+
+  const rGet = await mlFetch(
+    c.env,
+    db,
+    `/items/${l.ml_item_id}?include_attributes=all`,
+  );
+  if (!rGet.ok)
+    return c.json({ error: `no se pudo leer la publicación en ML (${rGet.status})` }, 502);
+  const item = (await rGet.json()) as MlItemFull;
+  if (item.family_name)
+    return c.json(
+      {
+        error:
+          `Esta publicación pertenece a una "familia de producto" de Mercado Libre ` +
+          `(family_name: "${item.family_name}"), y ML no permite agregar variantes por API ` +
+          `a ese tipo de ítem. Es el mismo caso ya conocido de las republicaciones con variantes: ` +
+          `hay que crear el color nuevo como una publicación aparte (con "Crear con IA", como ya ` +
+          `existe para los otros colores de este mismo producto) o agregarlo a mano desde el sitio de ML.`,
+      },
+      409,
+    );
+  const existentes = item.variations ?? [];
+
+  const comboExistente = existentes[0]?.attribute_combinations?.[0];
+  const atributoId = comboExistente?.id ?? (body.atributo_id?.trim() || undefined);
+  const atributoNombre =
+    comboExistente?.name ?? (body.atributo_nombre?.trim() || undefined);
+  if (!atributoId && !atributoNombre)
+    return c.json(
+      { error: "esta publicación no tiene variantes todavía: indicá por qué atributo va a variar" },
+      400,
+    );
+
+  const norm = (s: string) => s.trim().toLowerCase();
+  const valoresExistentes = new Set(
+    existentes
+      .map((v) => v.attribute_combinations?.[0]?.value_name)
+      .filter((v): v is string => Boolean(v))
+      .map(norm),
+  );
+  const repetido = items.find((it) => valoresExistentes.has(norm(it.value_name)));
+  if (repetido)
+    return c.json({ error: `ya existe una variante "${repetido.value_name}"` }, 400);
+
+  const precioDefault = existentes[0]?.price ?? item.price ?? undefined;
+
+  const fotosExistentes = (item.pictures ?? []).map((p) => ({ id: p.id }));
+  const fotosNuevas = [
+    ...new Set(items.flatMap((it) => (it.imagenes ?? []).filter(Boolean))),
+  ].map((source) => ({ source }));
+
+  const variacionesExistentes = existentes.map((v) => ({
+    id: v.id,
+    attribute_combinations: v.attribute_combinations,
+    available_quantity: v.available_quantity,
+    price: v.price,
+    ...(v.picture_ids?.length ? { picture_ids: v.picture_ids } : {}),
+  }));
+  const variacionesNuevas = items.map((it) => {
+    const combo = atributoId
+      ? { id: atributoId, value_name: it.value_name.trim() }
+      : { name: atributoNombre, value_name: it.value_name.trim() };
+    const pics = (it.imagenes ?? []).filter(Boolean);
+    return {
+      attribute_combinations: [combo],
+      available_quantity: Math.max(it.stock ?? 1, 1),
+      price: it.precio ?? precioDefault,
+      ...(pics.length ? { picture_ids: pics } : {}),
+    };
+  });
+
+  const rPut = await mlFetch(c.env, db, `/items/${l.ml_item_id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      pictures: [...fotosExistentes, ...fotosNuevas],
+      variations: [...variacionesExistentes, ...variacionesNuevas],
+    }),
+  });
+  const resp = (await rPut.json().catch(() => ({}))) as {
+    message?: string;
+    cause?: Array<{ message?: string; code?: string }>;
+  };
+  if (!rPut.ok) {
+    const detalle =
+      (resp.cause ?? [])
+        .map((x) => x.message || x.code)
+        .filter(Boolean)
+        .join(" · ") ||
+      resp.message ||
+      "error desconocido";
+    return c.json(
+      { error: `${detalle} — ${JSON.stringify(resp)}`.slice(0, 900) },
+      502,
+    );
+  }
+
+  const avisos: string[] = [];
+  try {
+    await syncOneItem(c.env, db, l.ml_item_id);
+    await derivarCatalogo(db);
+  } catch (e) {
+    avisos.push(`sync interno: ${(e as Error).message}`);
+  }
+
+  return c.json({ aplicado: true, agregadas: items.length, avisos });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicar como color nuevo: para publicaciones de una categoría "catálogo"
+// (family_name) donde ML no permite variaciones por API ni al crear ni al
+// editar. Arma el borrador de una publicación NUEVA (mismo título/categoría/
+// atributos/precio, foto recoloreada con IA) para revisar y publicar con el
+// mismo endpoint que "Crear con IA" (/ia/publicar).
+// ---------------------------------------------------------------------------
+
+interface PropuestaDuplicado {
+  titulo: string;
+  descripcion: string;
+  categoria_id: string;
+  precio: number | null;
+  imagenes: string[];
+  atributos: Array<{ id: string; nombre: string; valor: string; requerido: boolean }>;
+  family_name: string | null;
+  avisos: string[];
+}
+
+ia.post("/publicacion/:id/duplicar/proponer", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ valor?: string; generar_fotos?: boolean }>()
+    .catch(() => ({}) as { valor?: string; generar_fotos?: boolean });
+  const valor = (body.valor ?? "").trim();
+  if (!valor) return c.json({ error: "indicá el color/valor nuevo" }, 400);
+  const generarFotos = body.generar_fotos === true;
+
+  const db = supa(c.env);
+  const { data: l, error } = await db
+    .from("ml_listings")
+    .select("ml_item_id, titulo, precio, raw")
+    .eq("id", id)
+    .single();
+  if (error || !l) return c.json({ error: "publicación no encontrada" }, 404);
+
+  const raw = (l.raw ?? {}) as unknown as MlItemFull;
+  const avisos: string[] = [];
+
+  if (!raw.category_id)
+    return c.json({ error: "la publicación no tiene categoría en el mirror local" }, 400);
+
+  const atributosOrig = (raw.attributes ?? []).filter((a) => a.id);
+  const colorAttrOrig = atributosOrig.find((a) => /color/i.test(a.name ?? a.id ?? ""));
+
+  // sólo copiamos atributos que la categoría ACTUAL todavía reconoce: un
+  // atributo viejo/inválido (deprecado, o de cuando la publicación estaba en
+  // otra categoría) es la causa típica del "invalid_fields" genérico de ML.
+  const attrsCat = await categoriaAttrs(c.env, db, raw.category_id);
+  const validIds = new Set(attrsCat.map((a) => a.id));
+  const requeridos = attrsCat.filter((a) => a.tags?.required);
+  const colorAttrCat = attrsCat.find((a) => /color/i.test(a.name));
+
+  interface AtributoProp {
+    id: string;
+    nombre: string;
+    valor: string;
+    requerido: boolean;
+  }
+  const atributos: AtributoProp[] = [];
+  const vistos = new Set<string>();
+
+  for (const req of requeridos) {
+    const orig = atributosOrig.find((a) => a.id === req.id);
+    const esColor = colorAttrCat?.id === req.id;
+    atributos.push({
+      id: req.id,
+      nombre: req.name,
+      valor: esColor ? valor : (orig?.value_name ?? ""),
+      requerido: true,
+    });
+    vistos.add(req.id);
+  }
+
+  for (const a of atributosOrig) {
+    if (!a.id || vistos.has(a.id) || !validIds.has(a.id)) continue;
+    const esColor = colorAttrCat?.id === a.id;
+    let valorFinal = esColor ? valor : (a.value_name ?? "");
+    if (a.id === "SELLER_SKU" && valorFinal.trim())
+      valorFinal = `${valorFinal.trim()}-${valor.replace(/\s+/g, "").toUpperCase()}`;
+    if (!valorFinal.trim()) continue;
+    atributos.push({ id: a.id, nombre: a.name ?? a.id, valor: valorFinal, requerido: false });
+    vistos.add(a.id);
+  }
+
+  if (colorAttrCat && !vistos.has(colorAttrCat.id)) {
+    atributos.push({ id: colorAttrCat.id, nombre: colorAttrCat.name, valor, requerido: false });
+  } else if (!colorAttrCat) {
+    avisos.push(
+      'Esta categoría no tiene un atributo de "Color": el color sólo queda reflejado en el título y la foto.',
+    );
+  }
+
+  const faltantes = atributos.filter((a) => a.requerido && !a.valor.trim()).map((a) => a.nombre);
+  if (faltantes.length)
+    avisos.push(
+      `Completá estos atributos obligatorios antes de publicar: ${faltantes.join(", ")}.`,
+    );
+
+  if (!raw.family_name)
+    avisos.push(
+      "La publicación original no tiene family_name: si esta categoría lo exige, Mercado Libre va a rechazar la publicación al confirmar.",
+    );
+
+  // corta por palabra completa, nunca a la mitad de una (ML rechaza títulos raros)
+  const cortarPorPalabra = (s: string, max: number): string => {
+    if (s.length <= max) return s;
+    const corte = s.slice(0, max);
+    const ultimoEspacio = corte.lastIndexOf(" ");
+    return ultimoEspacio > 0 ? corte.slice(0, ultimoEspacio) : corte;
+  };
+  const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const tituloBase = l.titulo ?? raw.title ?? "";
+  const colorViejo = colorAttrOrig?.value_name?.trim();
+  // saco el color viejo del título (si estaba) para no duplicarlo/alargarlo
+  const baseSinColor = (
+    colorViejo && tituloBase.toLowerCase().includes(colorViejo.toLowerCase())
+      ? tituloBase.replace(new RegExp(escapeRegExp(colorViejo), "i"), "")
+      : tituloBase
+  )
+    .replace(/\s+-\s*$/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  // el color nuevo SIEMPRE va: reservamos su lugar y recortamos el resto si hace falta
+  const sufijo = ` ${valor}`;
+  const baseRecortada = cortarPorPalabra(baseSinColor, 60 - sufijo.length);
+  const titulo = `${baseRecortada}${sufijo}`.trim();
+  if (baseRecortada.length < baseSinColor.length)
+    avisos.push(
+      "El título original no entraba junto con el color nuevo dentro del límite de 60 caracteres: se acortó, revisalo antes de publicar.",
+    );
+
+  let descripcion = "";
+  try {
+    const rDesc = await mlFetch(c.env, db, `/items/${l.ml_item_id}/description`);
+    if (rDesc.ok) {
+      const dj = (await rDesc.json()) as { plain_text?: string; text?: string };
+      descripcion = dj.plain_text ?? dj.text ?? "";
+    }
+  } catch {
+    /* sin descripción original, Elias la completa a mano */
+  }
+
+  let imagenes: string[] = [];
+  if (generarFotos) {
+    const referencias = (raw.pictures ?? [])
+      .slice(0, 3)
+      .map((p) => p.secure_url ?? p.url)
+      .filter((u): u is string => Boolean(u));
+    if (referencias.length > 0) {
+      try {
+        const { url } = await generarImagen(c.env, {
+          prompt: `Cambiá el color del producto a "${valor}" manteniendo exactamente la
+misma pose, ángulo, encuadre, fondo e iluminación. No cambies nada más del producto.`,
+          imageUrls: referencias,
+          model: "google/nano-banana-edit",
+        });
+        imagenes = [await guardarFotoVariante(db, url)];
+      } catch (e) {
+        avisos.push(`no se pudo generar la foto con IA: ${(e as Error).message}`);
+      }
+    } else {
+      avisos.push("la publicación original no tiene fotos para usar de referencia");
+    }
+  }
+
+  const propuesta: PropuestaDuplicado = {
+    titulo,
+    descripcion,
+    categoria_id: raw.category_id,
+    precio: l.precio,
+    imagenes,
+    atributos,
+    family_name: raw.family_name ?? null,
+    avisos,
+  };
+  return c.json(propuesta);
 });

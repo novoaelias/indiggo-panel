@@ -1,6 +1,8 @@
 // Stock derivado + descuento de stock al despachar una venta.
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
+import type { Env } from "../env";
+import { mlFetch } from "./ml";
 import {
   calcBuffer,
   calcMinimo,
@@ -399,4 +401,161 @@ export async function avisarStockManual(
     entidad_tipo: "ml_order",
     entidad_id: orderId,
   } as Database["public"]["Tables"]["alerts"]["Insert"]);
+}
+
+// ---------- push automático del buffer de ML (nunca dejar una publicación en 0) ----------
+
+/** Cantidad publicada AHORA en ML (mirror), por variante y por producto simple sin
+ *  variantes — sólo de publicaciones activas. Se compara contra `stock_ml` para
+ *  saber qué hay que empujar. */
+export async function publicadoEnML(db: DB) {
+  const [{ data: mlvs }, { data: mls }] = await Promise.all([
+    db
+      .from("ml_listing_variations")
+      .select("ml_listing_id, product_variant_id, cantidad_ml"),
+    db
+      .from("ml_listings")
+      .select("id, product_id, cantidad_ml, tiene_variantes, estado"),
+  ]);
+  const activas = new Set(
+    (mls ?? []).filter((m) => m.estado === "active").map((m) => m.id),
+  );
+  const porVar = new Map<string, number[]>();
+  for (const v of mlvs ?? []) {
+    if (!v.product_variant_id || !activas.has(v.ml_listing_id)) continue;
+    const arr = porVar.get(v.product_variant_id) ?? [];
+    arr.push(v.cantidad_ml ?? 0);
+    porVar.set(v.product_variant_id, arr);
+  }
+  const porProd = new Map<string, number[]>();
+  for (const m of mls ?? []) {
+    if (!m.product_id || m.tiene_variantes || m.estado !== "active") continue;
+    const arr = porProd.get(m.product_id) ?? [];
+    arr.push(m.cantidad_ml ?? 0);
+    porProd.set(m.product_id, arr);
+  }
+  return { porVar, porProd };
+}
+
+/** Resuelve una variante interna a TODAS sus publicaciones/variaciones de ML
+ *  ACTIVAS. Una variante puede corresponder a varias publicaciones (grupo de
+ *  publicaciones duplicadas por cuotas): el buffer se publica a todas. */
+async function resolverMLTodas(
+  db: DB,
+  variantId: string,
+): Promise<Array<{ itemId: string; variationId: string | null }>> {
+  const { data: mlvs } = await db
+    .from("ml_listing_variations")
+    .select("ml_variation_id, ml_listings(ml_item_id, estado)")
+    .eq("product_variant_id", variantId);
+
+  const refs = (mlvs ?? [])
+    .map((v) => {
+      const l = v.ml_listings as
+        | { ml_item_id?: string; estado?: string }
+        | null;
+      return l?.ml_item_id && l.estado === "active"
+        ? { itemId: l.ml_item_id, variationId: v.ml_variation_id }
+        : null;
+    })
+    .filter((x): x is { itemId: string; variationId: string } => x != null);
+  if (refs.length) return refs;
+
+  // sin variaciones: publicación(es) activas sin variantes a nivel item
+  const { data: pv } = await db
+    .from("product_variants")
+    .select("product_id")
+    .eq("id", variantId)
+    .single();
+  if (!pv) return [];
+  const { data: mls } = await db
+    .from("ml_listings")
+    .select("ml_item_id")
+    .eq("product_id", pv.product_id)
+    .eq("estado", "active");
+  return (mls ?? []).map((m) => ({ itemId: m.ml_item_id, variationId: null }));
+}
+
+export interface ResultadoSincronizacionML {
+  pendientes: number;
+  publicados: number;
+  errores: string[];
+  items_tocados: string[];
+}
+
+/**
+ * Recalcula el buffer automático (`recalcularDerivado`) y empuja a Mercado
+ * Libre el `available_quantity` de toda variante desincronizada, para que
+ * ninguna publicación quede publicada en 0 (lo que hace que ML deje de
+ * recomendarla) mientras Elias repone stock real. Se llama sola en cada sync
+ * (cron horario + webhook de pedidos) además del botón manual en Stock — así
+ * Elias no tiene que entrar al panel para que el buffer se aplique.
+ * Los productos `descontinuado` se excluyen: no se les empuja stock porque
+ * Elias ya no los repone (la publicación puede seguir viva porque ML no la
+ * deja borrar, pero no hay que simular que tiene stock).
+ */
+export async function sincronizarStockML(
+  env: Env,
+  db: DB,
+  opts?: { onItemTocado?: (itemId: string) => Promise<void> },
+): Promise<ResultadoSincronizacionML> {
+  await recalcularDerivado(db);
+
+  const { data: vars } = await db
+    .from("product_variants")
+    .select("id, stock_ml, product_id, products(descontinuado)")
+    .eq("activo", true);
+
+  const { porVar: mlPorVar, porProd: mlPorProd } = await publicadoEnML(db);
+
+  const pendientes = (vars ?? []).filter((v) => {
+    if ((v.products as { descontinuado?: boolean } | null)?.descontinuado)
+      return false;
+    const live = mlPorVar.get(v.id) ?? mlPorProd.get(v.product_id) ?? [];
+    return live.some((n) => n !== v.stock_ml);
+  });
+
+  let ok = 0;
+  const errores: string[] = [];
+  const itemsTocados = new Set<string>();
+
+  const empujar = async (v: { id: string; stock_ml: number }) => {
+    const refs = await resolverMLTodas(db, v.id);
+    if (!refs.length) return;
+    let algunoOk = false;
+    for (const ref of refs) {
+      const path = ref.variationId
+        ? `/items/${ref.itemId}/variations/${ref.variationId}`
+        : `/items/${ref.itemId}`;
+      const r = await mlFetch(env, db, path, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ available_quantity: v.stock_ml }),
+      });
+      if (r.ok) {
+        algunoOk = true;
+        itemsTocados.add(ref.itemId);
+      } else {
+        errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 100)}`);
+      }
+    }
+    if (algunoOk) ok++;
+  };
+
+  const lote = pendientes.slice(0, 80);
+  for (let i = 0; i < lote.length; i += 5)
+    await Promise.all(lote.slice(i, i + 5).map(empujar));
+
+  if (opts?.onItemTocado) {
+    for (const it of itemsTocados) {
+      await opts.onItemTocado(it).catch(() => {});
+    }
+  }
+
+  return {
+    pendientes: pendientes.length,
+    publicados: ok,
+    errores,
+    items_tocados: [...itemsTocados],
+  };
 }

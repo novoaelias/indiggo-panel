@@ -73,7 +73,7 @@ export function Contenido() {
         />
       )}
 
-      {gastos.data && <GastoIA g={gastos.data} />}
+      {gastos.data && <details className="secondary-section"><summary>Uso y gastos de IA</summary><GastoIA g={gastos.data} /></details>}
 
       {piezas.loading && <EmptyHint>Cargando…</EmptyHint>}
       {piezas.error && <EmptyHint>No se pudo cargar: {piezas.error}</EmptyHint>}

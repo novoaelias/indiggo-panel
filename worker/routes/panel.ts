@@ -6,7 +6,11 @@ import { mlFetch } from "../lib/ml";
 import { descontarPorDespacho, syncEnvio, syncOneItem } from "../lib/sync";
 import { sheetsConfigurado, sheetsSuspendido } from "../lib/sheets";
 import { esVariantePieza, planificar, ventasRecientes } from "../lib/bom";
-import { recalcularDerivado } from "../lib/stock";
+import {
+  publicadoEnML,
+  recalcularDerivado,
+  sincronizarStockML,
+} from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
 import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
 import { etiquetaLogistica, pedidoActivo } from "../lib/envios";
@@ -18,14 +22,16 @@ panel.get("/publicaciones", async (c) => {
   const db = supa(c.env);
   const estado = c.req.query("estado");
   const q = c.req.query("q");
+  const verDescontinuadas = estado === "descontinuadas";
 
   let query = db
     .from("ml_listings")
     .select(
-      "id, ml_item_id, titulo, estado, precio, moneda, cantidad_ml, tiene_variantes, permalink, thumbnail, categoria_sugerida, categoria_analisis, reemplazada_por",
+      "id, ml_item_id, titulo, estado, precio, moneda, cantidad_ml, tiene_variantes, permalink, thumbnail, categoria_sugerida, categoria_analisis, reemplazada_por, family_name:raw->>family_name, products(descontinuado)",
     )
     .order("titulo");
-  if (estado && estado !== "todas") query = query.eq("estado", estado);
+  if (estado && estado !== "todas" && !verDescontinuadas)
+    query = query.eq("estado", estado);
   if (q) query = query.ilike("titulo", `%${q}%`);
 
   const { data, error } = await query;
@@ -42,7 +48,16 @@ panel.get("/publicaciones", async (c) => {
     porListing.set(v.ml_listing_id, cur);
   }
 
-  const publicaciones = (data ?? []).map((l) => {
+  // las descontinuadas (Elias ya no las vende, aunque ML no deje borrar la
+  // publicación) quedan afuera de todos los filtros salvo que se las pida
+  // explícitamente — es la idea de "no las quiero ver más".
+  const esDescontinuada = (l: { products: unknown }) =>
+    Boolean((l.products as { descontinuado?: boolean } | null)?.descontinuado);
+  const filtradas = (data ?? []).filter((l) =>
+    verDescontinuadas ? esDescontinuada(l) : !esDescontinuada(l),
+  );
+
+  const publicaciones = filtradas.map((l) => {
     const agg = porListing.get(l.id) ?? { n: 0, stock: 0 };
     return {
       id: l.id,
@@ -58,14 +73,48 @@ panel.get("/publicaciones", async (c) => {
       categoria_sugerida: l.categoria_sugerida,
       categoria_analisis: l.categoria_analisis,
       reemplazada_por: l.reemplazada_por,
+      familia: Boolean(l.family_name),
+      descontinuada: esDescontinuada(l),
     };
   });
 
-  const { data: todos } = await db.from("ml_listings").select("estado");
-  const conteo: Record<string, number> = { todas: todos?.length ?? 0 };
-  for (const r of todos ?? []) conteo[r.estado] = (conteo[r.estado] ?? 0) + 1;
+  const { data: todos } = await db
+    .from("ml_listings")
+    .select("estado, products(descontinuado)");
+  const conteo: Record<string, number> = { todas: 0, descontinuadas: 0 };
+  for (const r of todos ?? []) {
+    if (esDescontinuada(r)) {
+      conteo.descontinuadas++;
+      continue;
+    }
+    conteo.todas++;
+    conteo[r.estado] = (conteo[r.estado] ?? 0) + 1;
+  }
 
   return c.json({ publicaciones, conteo });
+});
+
+// Marca (o desmarca) un producto como descontinuado: Elias ya no lo vende más,
+// aunque la publicación de ML siga viva (ML no deja borrarla). Se guarda en el
+// producto interno — cubre también a las publicaciones hermanas (duplicados
+// por cuotas) del mismo producto.
+panel.post("/publicaciones/:id/descontinuar", async (c) => {
+  const id = c.req.param("id");
+  const { descontinuado } = await c.req.json<{ descontinuado?: boolean }>();
+  const db = supa(c.env);
+  const { data: listing } = await db
+    .from("ml_listings")
+    .select("product_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (!listing?.product_id)
+    return c.json({ error: "esta publicación no tiene producto vinculado" }, 400);
+  const { error } = await db
+    .from("products")
+    .update({ descontinuado: descontinuado !== false })
+    .eq("id", listing.product_id);
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ ok: true });
 });
 
 // Actualiza precios en lote. body: { cambios: [{ id, precio }] } (id = ml_listings.id)
@@ -141,36 +190,6 @@ panel.get("/metricas", async (c) => {
 
 // --- Stock y producción ---
 
-// Cantidades publicadas hoy en ML por variante — SÓLO publicaciones activas
-// (las pausadas/finalizadas/en revisión no se pueden actualizar).
-async function publicadoEnML(db: ReturnType<typeof supa>) {
-  const [{ data: mlvs }, { data: mls }] = await Promise.all([
-    db
-      .from("ml_listing_variations")
-      .select("ml_listing_id, product_variant_id, cantidad_ml"),
-    db
-      .from("ml_listings")
-      .select("id, product_id, cantidad_ml, tiene_variantes, estado"),
-  ]);
-  const activas = new Set(
-    (mls ?? []).filter((m) => m.estado === "active").map((m) => m.id),
-  );
-  const porVar = new Map<string, number[]>();
-  for (const v of mlvs ?? []) {
-    if (!v.product_variant_id || !activas.has(v.ml_listing_id)) continue;
-    const arr = porVar.get(v.product_variant_id) ?? [];
-    arr.push(v.cantidad_ml ?? 0);
-    porVar.set(v.product_variant_id, arr);
-  }
-  const porProd = new Map<string, number[]>();
-  for (const m of mls ?? []) {
-    if (!m.product_id || m.tiene_variantes || m.estado !== "active") continue;
-    const arr = porProd.get(m.product_id) ?? [];
-    arr.push(m.cantidad_ml ?? 0);
-    porProd.set(m.product_id, arr);
-  }
-  return { porVar, porProd };
-}
 
 const GRUPO_TIPO: Record<string, string> = {
   photocard: "Photocards",
@@ -202,7 +221,7 @@ panel.get("/stock", async (c) => {
     db
       .from("products")
       .select(
-        "id, nombre, variantes_por_integrante, categories(nombre, slug), groups(nombre)",
+        "id, nombre, variantes_por_integrante, descontinuado, categories(nombre, slug), groups(nombre)",
       ),
     db.from("variant_components").select("variant_id, component_id, cantidad"),
     db
@@ -217,6 +236,12 @@ panel.get("/stock", async (c) => {
   type Prod = NonNullable<typeof prods>[number];
   const prodById = new Map((prods ?? []).map((p) => [p.id, p as Prod]));
   const compById = new Map((comps ?? []).map((x) => [x.id, x]));
+  // los productos descontinuados (Elias ya no los vende, aunque ML no deje
+  // borrar la publicación) no cuentan acá: ni como "para producir/vender" ni
+  // como desincronizados con ML.
+  const variantsVigentes = (variants ?? []).filter(
+    (v) => !prodById.get(v.product_id)?.descontinuado,
+  );
   const nombreGrp = (p?: Prod) =>
     (p?.groups as { nombre?: string } | null)?.nombre ?? null;
   const slugCat = (p?: Prod) =>
@@ -321,7 +346,7 @@ panel.get("/stock", async (c) => {
   }
 
   // variantes de productos simples (mostacillas, clickers, stickers, llaveros…)
-  for (const v of variants ?? []) {
+  for (const v of variantsVigentes) {
     if (esHolderVar(v.id, v.product_id)) continue;
     // "Random / a elección": no es una pieza con stock propio.
     if (v.es_eleccion) continue;
@@ -382,7 +407,7 @@ panel.get("/stock", async (c) => {
     { nombre: string; grupo: string | null; total: number; sin: string[] }
   >();
 
-  for (const v of variants ?? []) {
+  for (const v of variantsVigentes) {
     if (v.es_eleccion) continue;
     const p = prodById.get(v.product_id);
     if (esHolderVar(v.id, v.product_id)) {
@@ -459,7 +484,7 @@ panel.get("/stock", async (c) => {
 
   // ---- resumen ----
   let desync = 0;
-  for (const v of variants ?? []) {
+  for (const v of variantsVigentes) {
     const live = ml.porVar.get(v.id) ?? ml.porProd.get(v.product_id) ?? [];
     if (live.some((n) => n !== v.stock_ml)) desync++;
   }
@@ -496,104 +521,20 @@ panel.patch("/stock/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-// Resuelve una variante interna a TODAS sus publicaciones/variaciones de ML.
-// Una variante puede corresponder a varias publicaciones (grupo de publicaciones
-// duplicadas por cuotas): el buffer se publica a todas.
-async function resolverMLTodas(
-  db: ReturnType<typeof supa>,
-  variantId: string,
-): Promise<Array<{ itemId: string; variationId: string | null }>> {
-  const { data: mlvs } = await db
-    .from("ml_listing_variations")
-    .select("ml_variation_id, ml_listings(ml_item_id, estado)")
-    .eq("product_variant_id", variantId);
-
-  const refs = (mlvs ?? [])
-    .map((v) => {
-      const l = v.ml_listings as
-        | { ml_item_id?: string; estado?: string }
-        | null;
-      return l?.ml_item_id && l.estado === "active"
-        ? { itemId: l.ml_item_id, variationId: v.ml_variation_id }
-        : null;
-    })
-    .filter((x): x is { itemId: string; variationId: string } => x != null);
-  if (refs.length) return refs;
-
-  // sin variaciones: publicación(es) activas sin variantes a nivel item
-  const { data: pv } = await db
-    .from("product_variants")
-    .select("product_id")
-    .eq("id", variantId)
-    .single();
-  if (!pv) return [];
-  const { data: mls } = await db
-    .from("ml_listings")
-    .select("ml_item_id")
-    .eq("product_id", pv.product_id)
-    .eq("estado", "active");
-  return (mls ?? []).map((m) => ({ itemId: m.ml_item_id, variationId: null }));
-}
-
 // Sincroniza Mercado Libre: recalcula los buffers automáticos y publica los que
-// quedaron desincronizados. El front lo llama solo (con debounce) tras cada
-// edición de stock, y también hay un botón manual.
+// quedaron desincronizados. Además de este botón manual, corre sola en cada
+// sync (cron horario + webhook de pedidos) — ver sincronizarStockML en lib/stock.
 panel.post("/stock/sincronizar-ml", async (c) => {
   const db = supa(c.env);
-  await recalcularDerivado(db);
-
-  const { data: vars } = await db
-    .from("product_variants")
-    .select("id, stock_ml, product_id")
-    .eq("activo", true);
-
-  const { porVar: mlPorVar, porProd: mlPorProd } = await publicadoEnML(db);
-
-  const pendientes = (vars ?? []).filter((v) => {
-    const live = mlPorVar.get(v.id) ?? mlPorProd.get(v.product_id) ?? [];
-    return live.some((n) => n !== v.stock_ml);
+  const r = await sincronizarStockML(c.env, db, {
+    onItemTocado: (it) =>
+      syncOneItem(c.env, db, it).catch(() => {}),
   });
-
-  let ok = 0;
-  const errores: string[] = [];
-  const itemsTocados = new Set<string>();
-
-  const empujar = async (v: { id: string; stock_ml: number }) => {
-    const refs = await resolverMLTodas(db, v.id);
-    if (!refs.length) return;
-    let algunoOk = false;
-    for (const ref of refs) {
-      const path = ref.variationId
-        ? `/items/${ref.itemId}/variations/${ref.variationId}`
-        : `/items/${ref.itemId}`;
-      const r = await mlFetch(c.env, db, path, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ available_quantity: v.stock_ml }),
-      });
-      if (r.ok) {
-        algunoOk = true;
-        itemsTocados.add(ref.itemId);
-      } else {
-        errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 100)}`);
-      }
-    }
-    if (algunoOk) ok++;
-  };
-
-  const lote = pendientes.slice(0, 80);
-  for (let i = 0; i < lote.length; i += 5)
-    await Promise.all(lote.slice(i, i + 5).map(empujar));
-
-  for (const it of itemsTocados) {
-    try {
-      await syncOneItem(c.env, db, it);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  return c.json({ pendientes: pendientes.length, publicados: ok, errores });
+  return c.json({
+    pendientes: r.pendientes,
+    publicados: r.publicados,
+    errores: r.errores,
+  });
 });
 
 // --- Planificador de producción (explota el BOM) ---
@@ -886,7 +827,9 @@ panel.post("/pedidos/:id/despachar", async (c) => {
 
   const { ya, aplicados, avisos } = await descontarPorDespacho(db, o.id);
   if (ya) return c.json({ ok: true, ya: true, aplicados: 0, avisos: [] });
-  await recalcularDerivado(db);
+  await sincronizarStockML(c.env, db, {
+    onItemTocado: (it) => syncOneItem(c.env, db, it).catch(() => {}),
+  });
   return c.json({ ok: true, aplicados, avisos });
 });
 

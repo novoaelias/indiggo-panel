@@ -24,7 +24,9 @@ export async function regenerarAlertas(db: DB): Promise<number> {
   const [{ data: vars }, { data: vcRows }] = await Promise.all([
     db
       .from("product_variants")
-      .select("id, product_id, stock_real, es_eleccion, products(nombre)")
+      .select(
+        "id, product_id, stock_real, es_eleccion, products(nombre, descontinuado)",
+      )
       .eq("activo", true),
     db.from("variant_components").select("variant_id"),
   ]);
@@ -35,6 +37,10 @@ export async function regenerarAlertas(db: DB): Promise<number> {
   >();
   for (const v of vars ?? []) {
     if (v.es_eleccion) continue;
+    // productos que Elias marcó como descontinuados: no van a "sin stock" (no
+    // los repone a propósito; ML no deja borrar la publicación).
+    if ((v.products as { descontinuado?: boolean } | null)?.descontinuado)
+      continue;
     const cur = porProducto.get(v.product_id) ?? {
       nombre: (v.products as { nombre?: string } | null)?.nombre ?? "?",
       total: 0,
@@ -57,14 +63,17 @@ export async function regenerarAlertas(db: DB): Promise<number> {
   }
 
   // --- publicaciones no activas ---
+  // (las de un producto descontinuado no cuentan: Elias ya sabe que están
+  // pausadas a propósito y no quiere que se lo sigan recordando)
   const { data: listings } = await db
     .from("ml_listings")
-    .select("titulo, estado")
+    .select("titulo, estado, products(descontinuado)")
     .neq("estado", "active");
-  const enRevision = (listings ?? []).filter(
-    (l) => l.estado === "under_review",
+  const vigentes = (listings ?? []).filter(
+    (l) => !(l.products as { descontinuado?: boolean } | null)?.descontinuado,
   );
-  const pausadas = (listings ?? []).filter((l) => l.estado !== "under_review");
+  const enRevision = vigentes.filter((l) => l.estado === "under_review");
+  const pausadas = vigentes.filter((l) => l.estado !== "under_review");
   if (enRevision.length)
     filas.push({
       tipo: "auto:en_revision",

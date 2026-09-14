@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { NAV } from "./nav";
 import { Logo } from "./Logo";
@@ -8,7 +8,9 @@ import { alternarTema, temaActual } from "@/lib/theme";
 function NavItems({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav className="flex flex-col gap-0.5">
-      {NAV.map(({ to, label, icon: Icon }) => (
+      {NAV.map(({ to, label, icon: Icon }, index) => (
+        <Fragment key={to}>
+        {(index === 0 || index === 4) && <div className="nav-section">{index === 0 ? "Tu día a día" : "Herramientas"}</div>}
         <NavLink
           key={to}
           to={to}
@@ -28,6 +30,7 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
           </span>
           <span>{label}</span>
         </NavLink>
+        </Fragment>
       ))}
     </nav>
   );
@@ -78,6 +81,7 @@ export function MobileDrawer({
         open ? "pointer-events-auto" : "pointer-events-none",
       )}
       aria-hidden={!open}
+      inert={!open}
     >
       <div
         onClick={onClose}
@@ -92,7 +96,7 @@ export function MobileDrawer({
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <Logo />
+        <div className="flex items-center justify-between"><Logo /><button aria-label="Cerrar menú" onClick={onClose}>×</button></div>
         <NavItems onNavigate={onClose} />
         <Footer />
       </div>

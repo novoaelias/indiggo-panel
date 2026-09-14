@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 import type { EstadoTono } from "@/lib/types";
 
 export function cx(...parts: Array<string | false | null | undefined>): string {
@@ -17,7 +17,7 @@ export function Card({
   return (
     <div
       className={cx(
-        "rounded-[12px] border bg-surface hairline",
+        "panel-card rounded-[12px] border bg-surface hairline",
         padding && "p-5",
         className,
       )}
@@ -37,7 +37,7 @@ export function PageHeader({
   acciones?: ReactNode;
 }) {
   return (
-    <div className="mb-7 flex flex-wrap items-start justify-between gap-3">
+    <div className="page-heading mb-7 flex flex-wrap items-start justify-between gap-3">
       <div>
         <h1 className="font-display text-[30px] font-extrabold tracking-[-0.01em]">
           {titulo}
@@ -54,12 +54,12 @@ export function PageHeader({
 export function PrimaryButton({
   children,
   onClick,
-}: {
-  children: ReactNode;
-  onClick?: () => void;
-}) {
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
+      type="button"
+      {...props}
       onClick={onClick}
       className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white transition-colors hover:bg-accent-hover"
     >
@@ -71,12 +71,12 @@ export function PrimaryButton({
 export function GhostButton({
   children,
   onClick,
-}: {
-  children: ReactNode;
-  onClick?: () => void;
-}) {
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
+      type="button"
+      {...props}
       onClick={onClick}
       className="rounded-[9px] border border-ink/12 px-4 py-2.5 text-[13.5px] font-semibold text-ink transition-colors hover:bg-ink/[0.03]"
     >

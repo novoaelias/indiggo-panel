@@ -1,16 +1,16 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { MobileDrawer, Sidebar } from "./components/Sidebar";
 import { Logo } from "./components/Logo";
 import { Gate } from "./components/Gate";
 import { IconMenu } from "./components/icons";
-import { Inicio } from "./pages/Inicio";
-import { Publicaciones } from "./pages/Publicaciones";
-import { Pedidos } from "./pages/Pedidos";
-import { Stock } from "./pages/Stock";
-import { Metricas } from "./pages/Metricas";
-import { Contenido } from "./pages/Contenido";
-import { Configuracion } from "./pages/Configuracion";
+const Inicio = lazy(() => import("./pages/Inicio").then(m => ({ default: m.Inicio })));
+const Publicaciones = lazy(() => import("./pages/Publicaciones").then(m => ({ default: m.Publicaciones })));
+const Pedidos = lazy(() => import("./pages/Pedidos").then(m => ({ default: m.Pedidos })));
+const Stock = lazy(() => import("./pages/Stock").then(m => ({ default: m.Stock })));
+const Metricas = lazy(() => import("./pages/Metricas").then(m => ({ default: m.Metricas })));
+const Contenido = lazy(() => import("./pages/Contenido").then(m => ({ default: m.Contenido })));
+const Configuracion = lazy(() => import("./pages/Configuracion").then(m => ({ default: m.Configuracion })));
 
 export function App() {
   return (
@@ -26,11 +26,12 @@ function Panel() {
 
   return (
     <div className="flex min-h-screen bg-paper">
+      <a href="#contenido-principal" className="skip-link">Ir al contenido</a>
       <Sidebar />
       <MobileDrawer open={drawer} onClose={() => setDrawer(false)} />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top bar solo mobile */}
+        <div className="workspace-bar hidden lg:flex"><span>INDIGGO STORE <span className="mx-3 opacity-30">/</span> Gestión de la tienda</span><span className="text-ink/50">Tu espacio de trabajo</span></div>
         <header className="sticky top-0 z-30 flex items-center gap-3 border-b hairline bg-surface/80 px-4 py-3 backdrop-blur lg:hidden">
           <button
             onClick={() => setDrawer(true)}
@@ -43,9 +44,11 @@ function Panel() {
         </header>
 
         <main
+          id="contenido-principal"
           key={location.pathname}
           className="mx-auto w-full max-w-[1180px] flex-1 px-5 pb-16 pt-6 sm:px-8 lg:px-12 lg:pt-10"
         >
+          <Suspense fallback={<div role="status" className="loading-panel">Preparando tu espacio de trabajo…</div>}>
           <Routes>
             <Route path="/" element={<Inicio />} />
             <Route path="/publicaciones" element={<Publicaciones />} />
@@ -56,6 +59,7 @@ function Panel() {
             <Route path="/configuracion" element={<Configuracion />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </Suspense>
         </main>
       </div>
     </div>

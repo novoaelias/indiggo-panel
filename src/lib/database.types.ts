@@ -717,6 +717,7 @@ export type Database = {
           activo: boolean
           category_id: string | null
           created_at: string
+          descontinuado: boolean
           group_id: string | null
           id: string
           nombre: string
@@ -729,6 +730,7 @@ export type Database = {
           activo?: boolean
           category_id?: string | null
           created_at?: string
+          descontinuado?: boolean
           group_id?: string | null
           id?: string
           nombre: string
@@ -741,6 +743,7 @@ export type Database = {
           activo?: boolean
           category_id?: string | null
           created_at?: string
+          descontinuado?: boolean
           group_id?: string | null
           id?: string
           nombre?: string

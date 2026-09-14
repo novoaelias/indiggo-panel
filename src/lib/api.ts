@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { clearPanelToken, getPanelToken } from "./auth";
 
 export class ApiError extends Error {
@@ -28,7 +28,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(401, "sesión expirada");
   }
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  let body;
+  try { body = text ? JSON.parse(text) : null; }
+  catch { throw new ApiError(res.status, "No pudimos conectar con el panel. Volvé a intentar en unos segundos."); }
   if (!res.ok) {
     throw new ApiError(res.status, body?.error ?? res.statusText);
   }
@@ -48,22 +50,16 @@ export function useApi<T>(path: string): AsyncState<T> {
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
-  const alive = useRef(true);
-
   useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
     setLoading(true);
     setError(undefined);
-    api<T>(path)
-      .then((d) => alive.current && setData(d))
-      .catch((e: Error) => alive.current && setError(e.message))
-      .finally(() => alive.current && setLoading(false));
+    api<T>(path, { signal: controller.signal })
+      .then((d) => active && setData(d))
+      .catch((e: Error) => active && setError(e.message))
+      .finally(() => active && setLoading(false));
+    return () => { active = false; controller.abort(); };
   }, [path, nonce]);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);

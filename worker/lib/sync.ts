@@ -13,7 +13,7 @@ import { fechaRepartoAR } from "./fecha";
 import {
   ajustarStockPorPedido,
   avisarStockManual,
-  recalcularDerivado,
+  sincronizarStockML,
 } from "./stock";
 
 type DB = SupabaseClient<Database>;
@@ -519,7 +519,11 @@ export async function syncOneOrder(
   const { id, shippingId } = await upsertOrder(db, o);
   await syncEnvio(env, db, { id, shippingId, status: o.status }).catch(() => {});
   await restaurarSiCancelado(db, id, o.status).catch(() => {});
-  await recalcularDerivado(db).catch(() => {});
+  // Empuja el buffer a ML al toque (no espera al cron horario): si esta venta
+  // dejó una publicación en 0, ML deja de recomendarla hasta que se sincronice.
+  await sincronizarStockML(env, db, {
+    onItemTocado: (it) => syncOneItem(env, db, it).catch(() => {}),
+  }).catch(() => {});
 }
 
 async function syncPedidos(
@@ -623,8 +627,14 @@ export async function syncAll(env: Env, db: DB): Promise<SyncResult> {
   });
 
   // Stock derivado (vendible de holders, buffer de ML, mínimos por ventas) +
-  // los descuentos por despacho que hayan quedado marcados en syncEnvio.
-  await seguro(errores, "stock", () => recalcularDerivado(db));
+  // los descuentos por despacho que hayan quedado marcados en syncEnvio, y el
+  // push de ese buffer a Mercado Libre (para que ninguna publicación quede en
+  // 0 y ML la deje de recomendar) — todo sin que Elias tenga que entrar al panel.
+  await seguro(errores, "stock", () =>
+    sincronizarStockML(env, db, {
+      onItemTocado: (it) => syncOneItem(env, db, it).catch(() => {}),
+    }),
+  );
 
   await regenerarAlertas(db).catch((e) =>
     errores.push(`alertas: ${(e as Error).message}`),

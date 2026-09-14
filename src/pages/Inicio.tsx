@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { Card, Dot, EmptyHint, PageHeader } from "@/components/ui";
 import { useApi } from "@/lib/api";
 import { formatARS, hoyLargo, saludo } from "@/lib/format";
@@ -47,6 +48,14 @@ export function Inicio() {
         })()}
       />
 
+      <section className="quick-start" aria-label="Accesos rápidos">
+        <div><span className="eyebrow">TU TIENDA, EN ORDEN</span><h2>¿Qué necesitás hacer hoy?</h2><p>Elegí una tarea para empezar.</p></div>
+        <div className="quick-links">{[
+          ["/pedidos", "01", "Preparar pedidos", "Revisá los próximos despachos"],
+          ["/publicaciones", "02", "Gestionar publicaciones", "Fotos, colores y precios"],
+          ["/stock", "03", "Organizar producción", "Qué tenés y qué falta producir"],
+        ].map(([to, n, title, desc]) => <Link to={to} key={to}><span className="quick-number">{n}</span><strong>{title} <span aria-hidden>↗</span></strong><small>{desc}</small></Link>)}</div>
+      </section>
       {loading && <EmptyHint>Cargando resumen…</EmptyHint>}
       {error && <EmptyHint>No se pudo cargar el resumen: {error}</EmptyHint>}
 
@@ -66,7 +75,8 @@ export function Inicio() {
             ))}
           </div>
 
-          <h2 className="mb-3.5 text-[15px] font-semibold">Alertas de hoy</h2>
+          <h2 className="mb-3.5 text-[15px] font-semibold">Necesita tu atención</h2>
+          {data.alertas.length === 0 && <div className="mb-6 rounded-xl bg-ok-bg p-5 text-ok">Todo al día. No hay alertas pendientes.</div>}
           <div className="mb-9 flex flex-col gap-2.5">
             {data.alertas.map((a, i) => (
               <div
@@ -96,14 +106,14 @@ export function Inicio() {
                     {p.comprador ?? "—"}
                   </div>
                   <div className="text-[12px] text-ink/50">
-                    {new Date(p.fecha).toLocaleString("es-AR")}
+                    {new Date(p.fecha).toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" })}
                   </div>
                 </div>
                 <div className="text-[13.5px] font-bold">
                   {p.total != null ? formatARS(p.total) : "—"}
                 </div>
                 <div className="w-20 text-right text-[12px] text-ink/50">
-                  {p.estado}
+                  {({ paid: "Pagado", cancelled: "Cancelado", confirmed: "Confirmado" } as Record<string, string>)[p.estado ?? ""] ?? p.estado}
                 </div>
               </div>
             ))}

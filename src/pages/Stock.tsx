@@ -188,7 +188,7 @@ export function Stock() {
 
       {d && !d.resumen.sin_catalogo && (
         <>
-          {d.productos.length > 0 && <PuedoVender productos={d.productos} />}
+          {d.productos.length > 0 && <details className="secondary-section"><summary>Ver productos disponibles para vender</summary><PuedoVender productos={d.productos} /></details>}
 
           <div className="grid gap-5 lg:grid-cols-[1.55fr_1fr]">
             <div>

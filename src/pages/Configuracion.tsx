@@ -22,20 +22,21 @@ interface Grupo {
 type Status = Record<"mercadolibre" | "supabase" | "claude" | "kie", boolean>;
 
 export function Configuracion() {
+  const [seccion, setSeccion] = useState("conexion");
   return (
     <div>
       <PageHeader
         titulo="Configuración"
-        subtitulo="Catálogo base, grupos de kpop e integrantes, conexiones"
+        subtitulo="Administrá las conexiones y preferencias de tu tienda"
       />
+      <div className="mb-6 flex flex-wrap gap-2" role="group" aria-label="Secciones de configuración">
+        {[["conexion", "Conexiones"], ["envios", "Envíos"], ["catalogo", "Catálogo"], ["grupos", "Grupos e integrantes"]].map(([id, label]) => <button key={id} aria-pressed={seccion === id} onClick={() => setSeccion(id)} className={seccion === id ? "rounded-lg bg-accent-soft px-4 py-2 text-accent font-semibold" : "rounded-lg px-4 py-2 text-ink/60"}>{label}</button>)}
+      </div>
       <div className="flex flex-col gap-8">
-        <MercadoLibreSection />
-        <FlexSection />
-        <PlanillaRepartoSection />
-        <CatalogoSection />
-        <UnirPublicacionesSection />
-        <GruposSection />
-        <ConexionesSection />
+        {seccion === "conexion" && <><MercadoLibreSection /><ConexionesSection /></>}
+        {seccion === "envios" && <><FlexSection /><PlanillaRepartoSection /></>}
+        {seccion === "catalogo" && <><CatalogoSection /><details className="secondary-section"><summary>Unir publicaciones del mismo producto</summary><UnirPublicacionesSection /></details></>}
+        {seccion === "grupos" && <GruposSection />}
       </div>
     </div>
   );

@@ -44,6 +44,8 @@ interface PublicacionApi {
   categoria_sugerida: string | null;
   categoria_analisis: CategoriaAnalisis | null;
   reemplazada_por: string | null;
+  familia: boolean;
+  descontinuada: boolean;
 }
 interface Resp {
   publicaciones: PublicacionApi[];
@@ -64,28 +66,49 @@ const FILTROS: Array<{ key: string; label: string }> = [
   { key: "active", label: "Activas" },
   { key: "under_review", label: "En revisión" },
   { key: "paused", label: "Pausadas" },
+  { key: "descontinuadas", label: "Descontinuadas" },
 ];
 
 export function Publicaciones() {
   const [filtro, setFiltro] = useState("todas");
   const [busqueda, setBusqueda] = useState("");
+  const [consulta, setConsulta] = useState("");
+  useEffect(() => { const timer = setTimeout(() => setConsulta(busqueda), 300); return () => clearTimeout(timer); }, [busqueda]);
   const qs = useMemo(() => {
     const p = new URLSearchParams();
     // "categoria" no es un estado de ML: traemos todas y filtramos en el cliente
     if (filtro !== "todas" && filtro !== "categoria") p.set("estado", filtro);
-    if (busqueda.trim()) p.set("q", busqueda.trim());
+    if (consulta.trim()) p.set("q", consulta.trim());
     return p.toString();
-  }, [filtro, busqueda]);
+  }, [filtro, consulta]);
 
   const { data, error, loading, reload } = useApi<Resp>(
     `/publicaciones${qs ? `?${qs}` : ""}`,
   );
   const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
+  const [varPara, setVarPara] = useState<PublicacionApi | null>(null);
   const [catPara, setCatPara] = useState<PublicacionApi | null>(null);
   const [nueva, setNueva] = useState(false);
   const [precios, setPrecios] = useState(false);
   const [analizando, setAnalizando] = useState(false);
   const [analisisMsg, setAnalisisMsg] = useState<string>();
+
+  async function alternarDescontinuada(p: PublicacionApi) {
+    const descontinuar = !p.descontinuada;
+    if (
+      !window.confirm(
+        descontinuar
+          ? `"${p.titulo}" va a dejar de aparecer en el panel (no se toca en Mercado Libre). ¿Confirmás?`
+          : `¿Volver a mostrar "${p.titulo}" en el panel?`,
+      )
+    )
+      return;
+    await api(`/publicaciones/${p.id}/descontinuar`, {
+      method: "POST",
+      body: JSON.stringify({ descontinuado: descontinuar }),
+    });
+    reload();
+  }
 
   async function analizarCategorias() {
     setAnalizando(true);
@@ -129,11 +152,29 @@ export function Publicaciones() {
           }}
         />
       )}
+      {varPara &&
+        (varPara.familia ? (
+          <DuplicarModal
+            publicacion={varPara}
+            onClose={() => setVarPara(null)}
+            onCreada={() => {
+              reload();
+            }}
+          />
+        ) : (
+          <VariantesModal
+            publicacion={varPara}
+            onClose={() => setVarPara(null)}
+            onAplicado={() => {
+              setVarPara(null);
+              reload();
+            }}
+          />
+        ))}
       {nueva && (
         <NuevaPublicacionModal
           onClose={() => setNueva(false)}
           onCreada={() => {
-            setNueva(false);
             reload();
           }}
         />
@@ -163,15 +204,11 @@ export function Publicaciones() {
         }
         acciones={
           <>
-            <GhostButton onClick={analizarCategorias}>
-              {analizando ? "Analizando…" : "Analizar categorías"}
-            </GhostButton>
-            <GhostButton onClick={() => setPrecios(true)}>
-              Editar precios
-            </GhostButton>
-            <PrimaryButton onClick={() => setNueva(true)}>
-              + Crear con IA
-            </PrimaryButton>
+            <details className="action-menu"><summary>Herramientas</summary><div>
+              <button disabled={analizando} onClick={analizarCategorias}>{analizando ? "Revisando…" : "Revisar categorías"}</button>
+              <button onClick={() => setPrecios(true)}>Actualizar precios en lote</button>
+            </div></details>
+            <PrimaryButton onClick={() => setNueva(true)}>+ Nueva publicación</PrimaryButton>
           </>
         }
       />
@@ -219,8 +256,9 @@ export function Publicaciones() {
         <input
           value={busqueda}
           onChange={(e) => setBusqueda(e.target.value)}
-          placeholder="Buscar…"
-          className="ml-auto w-44 rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
+          aria-label="Buscar publicaciones por nombre"
+          placeholder="Buscar una publicación…"
+          className="ml-auto w-full sm:w-64 rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
         />
       </div>
 
@@ -228,7 +266,7 @@ export function Publicaciones() {
       {error && <EmptyHint>No se pudieron cargar: {error}</EmptyHint>}
 
       {data && (
-        <Card padding={false} className="overflow-hidden">
+        <Card padding={false} className="listing-list">
           {publicacionesVisibles.map((p) => {
             const meta = ESTADO_META[p.estado] ?? {
               label: p.estado,
@@ -238,7 +276,7 @@ export function Publicaciones() {
             return (
               <div
                 key={p.id}
-                className="flex items-center gap-4 border-b hairline px-4 py-3 last:border-b-0"
+                className="listing-row flex items-center gap-4 border-b hairline px-4 py-3 last:border-b-0"
               >
                 <div className="h-11 w-11 shrink-0 overflow-hidden rounded-lg bg-ink/[0.04]">
                   {p.thumbnail && (
@@ -251,7 +289,7 @@ export function Publicaciones() {
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[14px] font-semibold">
+                  <div title={p.titulo} className="line-clamp-2 text-[14px] font-semibold">
                     {p.titulo}
                   </div>
                   <div className="mt-0.5 text-[12.5px] text-ink/50">
@@ -268,36 +306,29 @@ export function Publicaciones() {
                       className="mt-1 flex flex-wrap items-center gap-1.5 text-left text-[11.5px] text-danger hover:underline"
                     >
                       <Badge tono="danger">Revisar categoría</Badge>
-                      <span className="text-ink/45">
-                        {cat.actual_path} → <b>{cat.sugerida_path}</b>
-                      </span>
                     </button>
-                  ) : cat && cat.coincide ? (
-                    <div className="mt-1 text-[11.5px] text-ink/35">
-                      Categoría OK · {cat.actual_path}
-                    </div>
                   ) : null}
                 </div>
-                <div className="hidden w-24 shrink-0 text-right text-[14px] font-bold sm:block">
+                <div className="listing-price shrink-0 text-right text-[14px] font-bold sm:w-24">
                   {p.precio != null ? formatARS(p.precio) : "—"}
                 </div>
-                <div className="hidden sm:block">
+                <div className="flex items-center gap-1.5">
                   <Badge tono={meta.tono}>{meta.label}</Badge>
+                  {p.descontinuada && <Badge tono="neutral">Descontinuada</Badge>}
                 </div>
-                <button
-                  onClick={() => setIaPara(p)}
-                  className="shrink-0 text-[13px] font-semibold text-accent hover:text-accent-hover"
-                >
-                  IA
-                </button>
-                <a
-                  href={p.permalink ?? "#"}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="hidden shrink-0 text-[13px] font-semibold text-ink/45 hover:text-ink sm:block"
-                >
-                  Ver
-                </a>
+                <details className="action-menu listing-actions"><summary aria-label={`Acciones para ${p.titulo}`}>Gestionar</summary><div>
+                  {!p.descontinuada && (
+                    <>
+                      <button onClick={() => setVarPara(p)}>{p.familia ? "Crear otro color" : "Agregar variantes"}</button>
+                      <button onClick={() => setIaPara(p)}>Mejorar título y descripción</button>
+                      <button onClick={() => setCatPara(p)}>Revisar categoría</button>
+                    </>
+                  )}
+                  {p.permalink && <a href={p.permalink} target="_blank" rel="noreferrer">Ver en Mercado Libre ↗</a>}
+                  <button onClick={() => alternarDescontinuada(p)}>
+                    {p.descontinuada ? "Volver a mostrar en el panel" : "Descontinuar (dejar de ver en el panel)"}
+                  </button>
+                </div></details>
               </div>
             );
           })}
@@ -479,6 +510,569 @@ function SugerenciaModal({
                 Cambia título y descripción en la publicación real.
               </span>
             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface PropuestaVariante {
+  valor: string;
+  imagen_url: string | null;
+  error?: string;
+}
+interface RevisVariante {
+  valor: string;
+  imagenes: string[];
+  stock: string;
+}
+
+function VariantesModal({
+  publicacion,
+  onClose,
+  onAplicado,
+}: {
+  publicacion: PublicacionApi;
+  onClose: () => void;
+  onAplicado: () => void;
+}) {
+  const [nombres, setNombres] = useState<string[]>([""]);
+  const [cargando, setCargando] = useState<"ia" | "manual">();
+  const [err, setErr] = useState<string>();
+  const [atributoId, setAtributoId] = useState<string | null>(null);
+  const [atributoNombre, setAtributoNombre] = useState<string | null>(null);
+  const [ejeManual, setEjeManual] = useState("");
+  const [revis, setRevis] = useState<RevisVariante[]>([]);
+  const [regenerando, setRegenerando] = useState<string>();
+  const [aplicando, setAplicando] = useState(false);
+  const [resultado, setResultado] = useState<{ agregadas: number; avisos: string[] }>();
+
+  async function generar(modo: "ia" | "manual") {
+    const valores = [...new Set(nombres.map((n) => n.trim()).filter(Boolean))];
+    if (valores.length === 0) return;
+    setCargando(modo);
+    setErr(undefined);
+    try {
+      const r = await api<{
+        atributo_id: string | null;
+        atributo_nombre: string | null;
+        propuestas: PropuestaVariante[];
+      }>(`/ia/publicacion/${publicacion.id}/variantes/proponer`, {
+        method: "POST",
+        body: JSON.stringify({ valores, generar_fotos: modo === "ia" }),
+      });
+      setAtributoId(r.atributo_id);
+      setAtributoNombre(r.atributo_nombre);
+      if (!r.atributo_id && !r.atributo_nombre) setEjeManual("Color");
+      setRevis(
+        r.propuestas.map((p) => ({
+          valor: p.valor,
+          imagenes: p.imagen_url ? [p.imagen_url] : [],
+          stock: "1",
+        })),
+      );
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCargando(undefined);
+    }
+  }
+
+  async function regenerar(valor: string) {
+    setRegenerando(valor);
+    setErr(undefined);
+    try {
+      const r = await api<{ propuestas: PropuestaVariante[] }>(
+        `/ia/publicacion/${publicacion.id}/variantes/proponer`,
+        { method: "POST", body: JSON.stringify({ valores: [valor] }) },
+      );
+      const p = r.propuestas[0];
+      setRevis((s) =>
+        s.map((x) =>
+          x.valor === valor
+            ? { ...x, imagenes: p?.imagen_url ? [p.imagen_url] : x.imagenes }
+            : x,
+        ),
+      );
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setRegenerando(undefined);
+    }
+  }
+
+  const faltaEje = !atributoId && !atributoNombre && !ejeManual.trim();
+
+  async function aplicar() {
+    if (
+      !window.confirm(
+        `Se van a agregar ${revis.length} variante(s) nueva(s) a esta publicación en Mercado Libre. ¿Confirmás?`,
+      )
+    )
+      return;
+    setAplicando(true);
+    setErr(undefined);
+    try {
+      const r = await api<{ agregadas: number; avisos: string[] }>(
+        `/ia/publicacion/${publicacion.id}/variantes/aplicar`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            atributo_id: atributoId ?? undefined,
+            atributo_nombre: atributoId ? undefined : atributoNombre ?? ejeManual.trim(),
+            items: revis.map((v) => ({
+              value_name: v.valor,
+              imagenes: v.imagenes,
+              stock: Number(v.stock) || 1,
+            })),
+          }),
+        },
+      );
+      setResultado(r);
+      onAplicado();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setAplicando(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
+      <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <h2 className="text-[16px] font-semibold">Agregar variante con IA</h2>
+          <button
+            onClick={onClose}
+            className="text-[18px] font-bold text-ink/40 hover:text-ink"
+          >
+            ×
+          </button>
+        </div>
+        <p className="mb-4 text-[12.5px] text-ink/50">{publicacion.titulo}</p>
+
+        {resultado ? (
+          <div className="flex flex-col gap-3 text-[13.5px]">
+            <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
+              Se agregaron {resultado.agregadas} variante(s) a la publicación.
+            </div>
+            {resultado.avisos.length > 0 && (
+              <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
+                {resultado.avisos.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            )}
+            <PrimaryButton onClick={onClose}>Cerrar</PrimaryButton>
+          </div>
+        ) : revis.length === 0 ? (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <span className="text-[12.5px] text-ink/50">
+                Colores / valores nuevos a agregar
+              </span>
+              {nombres.map((n, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    value={n}
+                    onChange={(e) =>
+                      setNombres((s) => s.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                    placeholder="ej: Azul"
+                    className="min-w-0 flex-1 rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent"
+                  />
+                  {nombres.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setNombres((s) => s.filter((_, j) => j !== i))}
+                      className="text-[16px] font-bold text-ink/35 hover:text-danger"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setNombres((s) => [...s, ""])}
+                className="self-start text-[12.5px] font-semibold text-accent hover:text-accent-hover"
+              >
+                + agregar valor
+              </button>
+            </div>
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            <div className="flex flex-wrap items-center gap-3">
+              <PrimaryButton onClick={() => !cargando && generar("ia")}>
+                {cargando === "ia" ? "Generando fotos…" : "Generar fotos con IA"}
+              </PrimaryButton>
+              <GhostButton onClick={() => !cargando && generar("manual")}>
+                {cargando === "manual" ? "Cargando…" : "Ya tengo las fotos"}
+              </GhostButton>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {!atributoId && !atributoNombre && (
+              <label className="flex flex-col gap-1.5">
+                <span className="text-[12.5px] text-ink/50">
+                  Esta publicación no tiene variantes todavía: ¿por qué van a variar?
+                </span>
+                <input
+                  value={ejeManual}
+                  onChange={(e) => setEjeManual(e.target.value)}
+                  placeholder="ej: Color"
+                  className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
+                />
+              </label>
+            )}
+            {revis.map((v, i) => (
+              <div
+                key={v.valor}
+                className="flex flex-col gap-2 border-t hairline pt-3 first:border-t-0 first:pt-0"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="flex-1 text-[13.5px] font-semibold">{v.valor}</span>
+                  <input
+                    value={v.stock}
+                    onChange={(e) =>
+                      setRevis((s) =>
+                        s.map((x, j) => (j === i ? { ...x, stock: e.target.value } : x)),
+                      )
+                    }
+                    inputMode="numeric"
+                    title="Stock"
+                    className="w-16 rounded-lg border border-ink/12 px-2 py-2 text-center text-[13px] outline-none focus:border-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => regenerar(v.valor)}
+                    disabled={regenerando === v.valor}
+                    className="text-[12px] font-semibold text-accent hover:text-accent-hover disabled:opacity-50"
+                  >
+                    {regenerando === v.valor ? "Generando…" : "Regenerar"}
+                  </button>
+                </div>
+                <SubirFotos
+                  fotos={v.imagenes}
+                  onChange={(f) =>
+                    setRevis((s) => s.map((x, j) => (j === i ? { ...x, imagenes: f } : x)))
+                  }
+                  max={6}
+                />
+              </div>
+            ))}
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            {faltaEje && (
+              <div className="text-[12.5px] text-danger">
+                Completá "¿por qué van a variar?" arriba para poder aplicar.
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-3 border-t hairline pt-4">
+              <button
+                onClick={aplicar}
+                disabled={aplicando || faltaEje}
+                className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                {aplicando ? "Aplicando…" : "Aplicar a Mercado Libre"}
+              </button>
+              <span className="text-[11.5px] text-ink/40">
+                Agrega estas variantes a la publicación real, sin tocar las que ya tiene.
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface AtributoDup {
+  id: string;
+  nombre: string;
+  valor: string;
+  requerido: boolean;
+}
+interface PropuestaDuplicado {
+  titulo: string;
+  descripcion: string;
+  categoria_id: string;
+  precio: number | null;
+  imagenes: string[];
+  atributos: AtributoDup[];
+  family_name: string | null;
+  avisos: string[];
+}
+
+// Para publicaciones de categoría "familia de producto" (ML no admite
+// variaciones por API): arma el borrador de una publicación NUEVA a partir de
+// una existente, cambiando sólo el color, y la publica con el mismo endpoint
+// que "Crear con IA" (/ia/publicar) — como ya son sus publicaciones hermanas.
+function DuplicarModal({
+  publicacion,
+  onClose,
+  onCreada,
+}: {
+  publicacion: PublicacionApi;
+  onClose: () => void;
+  onCreada: () => void;
+}) {
+  const [valor, setValor] = useState("");
+  const [cargando, setCargando] = useState<"ia" | "manual">();
+  const [err, setErr] = useState<string>();
+  const [prop, setProp] = useState<{ avisos: string[] }>();
+
+  const [titulo, setTitulo] = useState("");
+  const [descripcion, setDescripcion] = useState("");
+  const [categoriaId, setCategoriaId] = useState("");
+  const [precio, setPrecio] = useState("");
+  const [stock, setStock] = useState("1");
+  const [imagenes, setImagenes] = useState<string[]>([]);
+  const [atributos, setAtributos] = useState<AtributoDup[]>([]);
+  const [familyName, setFamilyName] = useState("");
+
+  const [publicando, setPublicando] = useState(false);
+  const [resultado, setResultado] =
+    useState<{ permalink: string | null; pausada?: boolean; avisos: string[] }>();
+
+  const faltanRequeridos = atributos.filter((a) => a.requerido && !a.valor.trim());
+
+  async function generar(modo: "ia" | "manual") {
+    if (!valor.trim()) return;
+    setCargando(modo);
+    setErr(undefined);
+    try {
+      const r = await api<PropuestaDuplicado>(
+        `/ia/publicacion/${publicacion.id}/duplicar/proponer`,
+        {
+          method: "POST",
+          body: JSON.stringify({ valor: valor.trim(), generar_fotos: modo === "ia" }),
+        },
+      );
+      setTitulo(r.titulo);
+      setDescripcion(r.descripcion);
+      setCategoriaId(r.categoria_id);
+      setPrecio(r.precio != null ? String(r.precio) : "");
+      setImagenes(r.imagenes);
+      setAtributos(r.atributos);
+      setFamilyName(r.family_name ?? publicacion.titulo);
+      setProp({ avisos: r.avisos });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCargando(undefined);
+    }
+  }
+
+  async function publicar() {
+    if (faltanRequeridos.length > 0) return;
+    if (
+      !window.confirm(
+        "Se va a crear una publicación NUEVA en Mercado Libre EN PAUSA (no toca la original). ¿Confirmás?",
+      )
+    )
+      return;
+    setPublicando(true);
+    setErr(undefined);
+    try {
+      const r = await api<{ permalink: string | null; pausada?: boolean; avisos: string[] }>(
+        "/ia/publicar",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            titulo,
+            descripcion,
+            categoria_id: categoriaId,
+            precio: Number(precio),
+            stock: Number(stock) || 1,
+            imagenes,
+            atributos: atributos
+              .filter((a) => a.valor.trim())
+              .map((a) => ({ id: a.id, value_name: a.valor.trim() })),
+            family_name: familyName.trim() || undefined,
+          }),
+        },
+      );
+      setResultado(r);
+      onCreada();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setPublicando(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto scrim p-4 sm:p-8">
+      <div className="w-full max-w-2xl rounded-[14px] border bg-surface p-6 hairline">
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <h2 className="text-[16px] font-semibold">Crear otro color</h2>
+          <button
+            onClick={onClose}
+            className="text-[18px] font-bold text-ink/40 hover:text-ink"
+          >
+            ×
+          </button>
+        </div>
+        <p className="mb-4 text-[12.5px] text-ink/50">{publicacion.titulo}</p>
+
+        {resultado ? (
+          <div className="flex flex-col gap-3 text-[13.5px]">
+            <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
+              Publicación creada. <b>{resultado.pausada ? "En pausa, lista para revisar." : "Revisá su estado en Mercado Libre."}</b>
+            </div>
+            {resultado.avisos?.length > 0 && (
+              <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
+                {resultado.avisos.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            )}
+            {resultado.permalink && (
+              <a
+                href={resultado.permalink}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-accent"
+              >
+                Abrir en Mercado Libre →
+              </a>
+            )}
+            <PrimaryButton onClick={onClose}>Cerrar</PrimaryButton>
+          </div>
+        ) : !prop ? (
+          <div className="flex flex-col gap-4">
+            <div className="rounded-lg bg-warn-bg px-3 py-2.5 text-[12.5px] text-warn">
+              Creá un nuevo color usando los datos de este producto. Primero elegí el color y las fotos; después revisá y confirmá la publicación.
+            </div>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[12.5px] text-ink/50">Color / valor nuevo</span>
+              <input
+                autoFocus
+                value={valor}
+                onChange={(e) => setValor(e.target.value)}
+                placeholder="ej: Azul"
+                className="rounded-lg border border-ink/12 px-3 py-2.5 text-[13.5px] outline-none focus:border-accent"
+              />
+            </label>
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            <div className="flex flex-wrap items-center gap-3">
+              <PrimaryButton disabled={Boolean(cargando) || !valor.trim()} onClick={() => generar("manual")}>
+                {cargando === "manual" ? "Preparando…" : "Continuar con mis fotos"}
+              </PrimaryButton>
+              <GhostButton disabled={Boolean(cargando) || !valor.trim()} onClick={() => generar("ia")}>
+                {cargando === "ia" ? "Generando…" : "Crear foto con IA (opcional)"}
+              </GhostButton>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {prop.avisos.length > 0 && (
+              <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
+                {prop.avisos.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            )}
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[12.5px] text-ink/50">Fotos</span>
+              <SubirFotos fotos={imagenes} onChange={setImagenes} max={10} />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Categoría (id)">
+                <input
+                  value={categoriaId}
+                  onChange={(e) => setCategoriaId(e.target.value)}
+                  className="w-full bg-transparent outline-none"
+                />
+              </Field>
+              <Field label="Precio">
+                <input
+                  value={precio}
+                  onChange={(e) => setPrecio(e.target.value)}
+                  inputMode="numeric"
+                  className="w-full bg-transparent outline-none"
+                />
+              </Field>
+              <Field label="Stock">
+                <input
+                  value={stock}
+                  onChange={(e) => setStock(e.target.value)}
+                  inputMode="numeric"
+                  className="w-full bg-transparent outline-none"
+                />
+              </Field>
+            </div>
+            <details className="secondary-section"><summary>Revisar nombre y descripción copiados</summary>
+            <Field label={familyName ? "Título de referencia · Mercado Libre genera el definitivo" : `Título (${titulo.length}/60)`}>
+              <input
+                value={titulo}
+                readOnly={Boolean(familyName)}
+                maxLength={60}
+                onChange={(e) => setTitulo(e.target.value)}
+                className="w-full bg-transparent outline-none"
+              />
+            </Field>
+            <Field label="Descripción">
+              <textarea
+                value={descripcion}
+                onChange={(e) => setDescripcion(e.target.value)}
+                rows={6}
+                className="w-full resize-y bg-transparent outline-none"
+              />
+            </Field>
+            <Field label="Nombre base del producto">
+              <input
+                value={familyName}
+                onChange={(e) => setFamilyName(e.target.value)}
+                className="w-full bg-transparent outline-none"
+              />
+            </Field>
+            </details>
+            {atributos.length > 0 && (
+              <details className="secondary-section" open={faltanRequeridos.length > 0 ? true : undefined}><summary>Características del producto{faltanRequeridos.length > 0 ? ` · ${faltanRequeridos.length} por completar` : ""}</summary>
+              <div className="flex flex-col gap-2">
+                <span className="text-[12.5px] text-ink/50">Atributos</span>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {atributos.map((a, i) => {
+                    const vacio = a.requerido && !a.valor.trim();
+                    return (
+                      <label key={a.id} className="flex flex-col gap-1">
+                        <span className="text-[11.5px] text-ink/45">
+                          {a.nombre}
+                          {a.requerido && <span className="text-danger"> · obligatorio</span>}
+                        </span>
+                        <input
+                          value={a.valor}
+                          onChange={(e) =>
+                            setAtributos((s) =>
+                              s.map((x, j) =>
+                                j === i ? { ...x, valor: e.target.value } : x,
+                              ),
+                            )
+                          }
+                          className={cx(
+                            "rounded-lg border px-2.5 py-1.5 text-[12.5px] outline-none focus:border-accent",
+                            vacio ? "border-danger" : "border-ink/12",
+                          )}
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div></details>
+            )}
+            {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            {faltanRequeridos.length > 0 && (
+              <div className="text-[12.5px] text-danger">
+                Completá los atributos obligatorios para poder publicar:{" "}
+                {faltanRequeridos.map((a) => a.nombre).join(", ")}.
+              </div>
+            )}
+            {!imagenes.length && <p className="text-[13px] text-ink/60">Cargá al menos una foto del nuevo color para publicar.</p>}
+            <PrimaryButton disabled={publicando || !imagenes.length || faltanRequeridos.length > 0} onClick={publicar}>
+              {publicando ? "Publicando…" : "Publicar en pausa"}
+            </PrimaryButton>
           </div>
         )}
       </div>
@@ -668,7 +1262,7 @@ function NuevaPublicacionModal({
   const [varAttrId, setVarAttrId] = useState("");
   const [publicando, setPublicando] = useState(false);
   const [resultado, setResultado] =
-    useState<{ permalink: string | null; avisos: string[] }>();
+    useState<{ permalink: string | null; pausada?: boolean; avisos: string[] }>();
 
   const varsListas = vars.filter((v) => v.nombre.trim());
 
@@ -729,7 +1323,7 @@ function NuevaPublicacionModal({
         prop?.variacion?.atributos.find((a) => a.id === varAttrId)?.nombre ||
         eje.trim() ||
         "Variante";
-      const r = await api<{ permalink: string | null; avisos: string[] }>(
+      const r = await api<{ permalink: string | null; pausada?: boolean; avisos: string[] }>(
         "/ia/publicar",
         {
           method: "POST",
@@ -782,7 +1376,7 @@ function NuevaPublicacionModal({
         {resultado ? (
           <div className="flex flex-col gap-3 text-[13.5px]">
             <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
-              Publicación creada <b>en pausa</b>. Revisá fotos, variantes y envío
+              Publicación creada. <b>{resultado.pausada ? "En pausa." : "Revisá su estado en Mercado Libre."}</b> Revisá fotos, variantes y envío
               en Mercado Libre y activala desde ahí.
             </div>
             {resultado.avisos?.length > 0 && (

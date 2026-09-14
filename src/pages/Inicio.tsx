@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, Dot, EmptyHint, PageHeader } from "@/components/ui";
-import { useApi } from "@/lib/api";
+import { api, useApi } from "@/lib/api";
 import { formatARS, hoyLargo, saludo } from "@/lib/format";
 
 interface InicioData {
@@ -17,6 +18,8 @@ interface InicioData {
     estado: string | null;
   }>;
   alertas: Array<{
+    id: string;
+    tipo: string;
     tono: "ok" | "warn" | "danger" | "info";
     titulo: string;
     texto: string;
@@ -24,7 +27,7 @@ interface InicioData {
 }
 
 export function Inicio() {
-  const { data, error, loading } = useApi<InicioData>("/inicio");
+  const { data, error, loading, reload } = useApi<InicioData>("/inicio");
 
   const stats = data
     ? [
@@ -78,19 +81,8 @@ export function Inicio() {
           <h2 className="mb-3.5 text-[15px] font-semibold">Necesita tu atención</h2>
           {data.alertas.length === 0 && <div className="mb-6 rounded-xl bg-ok-bg p-5 text-ok">Todo al día. No hay alertas pendientes.</div>}
           <div className="mb-9 flex flex-col gap-2.5">
-            {data.alertas.map((a, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-3.5 rounded-[12px] border bg-surface p-4 hairline"
-              >
-                <Dot tono={a.tono} />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[14px] font-semibold">{a.titulo}</div>
-                  <div className="mt-0.5 text-[13.5px] text-ink/55">
-                    {a.texto}
-                  </div>
-                </div>
-              </div>
+            {data.alertas.map((a) => (
+              <AlertaFila key={a.id} alerta={a} onResuelta={reload} />
             ))}
           </div>
 
@@ -124,6 +116,59 @@ export function Inicio() {
             )}
           </Card>
         </>
+      )}
+    </div>
+  );
+}
+
+function AlertaFila({
+  alerta,
+  onResuelta,
+}: {
+  alerta: InicioData["alertas"][number];
+  onResuelta: () => void;
+}) {
+  const [verificando, setVerificando] = useState(false);
+  const [motivo, setMotivo] = useState<string>();
+
+  async function resolver() {
+    setVerificando(true);
+    setMotivo(undefined);
+    try {
+      const r = await api<{ resuelta: boolean; motivo?: string }>(
+        `/alertas/${alerta.id}/resolver`,
+        { method: "POST" },
+      );
+      if (r.resuelta) onResuelta();
+      else setMotivo(r.motivo ?? "todavía no se puede descartar");
+    } catch (e) {
+      setMotivo((e as Error).message);
+    } finally {
+      setVerificando(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3.5 rounded-[12px] border bg-surface p-4 hairline">
+      <Dot tono={alerta.tono} />
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-semibold">{alerta.titulo}</div>
+        <div className="mt-0.5 text-[13.5px] text-ink/55">{alerta.texto}</div>
+        {motivo && (
+          <div className="mt-1 text-[12px] text-warn">
+            No se descartó: {motivo}
+          </div>
+        )}
+      </div>
+      {alerta.tipo === "venta_stock_manual" && (
+        <button
+          onClick={resolver}
+          disabled={verificando}
+          className="shrink-0 rounded-lg border border-ink/12 px-3 py-1.5 text-[12.5px] font-semibold text-ink/60 hover:bg-ink/[0.04] disabled:opacity-50"
+          title="Verifica el stock real antes de borrarla"
+        >
+          {verificando ? "Verificando…" : "Ya lo ajusté"}
+        </button>
       )}
     </div>
   );

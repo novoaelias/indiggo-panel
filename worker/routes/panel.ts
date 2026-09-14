@@ -9,6 +9,7 @@ import { esVariantePieza, planificar, ventasRecientes } from "../lib/bom";
 import {
   publicadoEnML,
   recalcularDerivado,
+  resolverAlertaManual,
   sincronizarStockML,
 } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
@@ -606,7 +607,7 @@ panel.get("/inicio", async (c) => {
         .limit(5),
       db
         .from("alerts")
-        .select("tipo, severidad, titulo, detalle")
+        .select("id, tipo, severidad, titulo, detalle")
         .is("resuelta_at", null)
         .order("created_at", { ascending: false })
         .limit(12),
@@ -618,6 +619,8 @@ panel.get("/inicio", async (c) => {
     listings.data?.filter((l) => l.estado === "active").length ?? 0;
 
   const alertas = (alertasRows.data ?? []).map((a) => ({
+    id: a.id,
+    tipo: a.tipo,
     tono: TONO_POR_SEV[a.severidad] ?? "info",
     titulo: a.titulo,
     texto: a.detalle ?? "",
@@ -837,4 +840,13 @@ panel.post("/alertas/regenerar", async (c) => {
   const db = supa(c.env);
   const n = await regenerarAlertas(db);
   return c.json({ ok: true, alertas: n });
+});
+
+// Descarta una alerta de "ajustá stock a mano" — pero sólo si se verifica
+// contra el stock real actual que Elias ya la corrigió. Si no, la deja.
+panel.post("/alertas/:id/resolver", async (c) => {
+  const db = supa(c.env);
+  const id = c.req.param("id");
+  const r = await resolverAlertaManual(db, id);
+  return c.json(r);
 });

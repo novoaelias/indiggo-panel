@@ -21,6 +21,7 @@ export type Database = {
           entidad_id: string | null
           entidad_tipo: string | null
           id: string
+          meta: Json | null
           resuelta_at: string | null
           severidad: string
           tipo: string
@@ -32,6 +33,7 @@ export type Database = {
           entidad_id?: string | null
           entidad_tipo?: string | null
           id?: string
+          meta?: Json | null
           resuelta_at?: string | null
           severidad?: string
           tipo: string
@@ -43,6 +45,7 @@ export type Database = {
           entidad_id?: string | null
           entidad_tipo?: string | null
           id?: string
+          meta?: Json | null
           resuelta_at?: string | null
           severidad?: string
           tipo?: string

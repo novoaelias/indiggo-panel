@@ -10,6 +10,7 @@ import { derivarBOM } from "./bom";
 import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
 import { envioTerminado } from "./envios";
 import { fechaRepartoAR } from "./fecha";
+import type { ChequeoStock } from "./stock";
 import {
   ajustarStockPorPedido,
   avisarStockManual,
@@ -357,8 +358,9 @@ export async function descontarPorDespacho(
 
   let aplicados = 0;
   let avisos: string[] = [];
+  let chequeos: ChequeoStock[] = [];
   try {
-    ({ aplicados, avisos } = await ajustarStockPorPedido(db, orderId, -1));
+    ({ aplicados, avisos, chequeos } = await ajustarStockPorPedido(db, orderId, -1));
   } catch (e) {
     // no se pudo tocar el stock: soltar el claim para reintentar en el próximo sync
     await db
@@ -374,6 +376,7 @@ export async function descontarPorDespacho(
     orderId,
     (o as { comprador?: string | null }).comprador ?? null,
     avisos,
+    chequeos,
   );
   return { ya: false, aplicados, avisos };
 }

@@ -281,9 +281,18 @@ async function sumarStockComponente(db: DB, componentId: string, delta: number) 
     .eq("id", componentId);
 }
 
+/** Para poder verificar más tarde si un aviso de stock manual ya se corrigió:
+ *  qué variante quedó mal y en qué valor quedó (`trasIncidente`) — si ahora
+ *  tiene más que eso, es que Elias ya la ajustó. */
+export interface ChequeoStock {
+  variantId: string;
+  trasIncidente: number;
+}
+
 export interface ResultadoDescuento {
   aplicados: number;
   avisos: string[];
+  chequeos: ChequeoStock[];
 }
 
 /**
@@ -304,6 +313,7 @@ export async function ajustarStockPorPedido(
     .eq("ml_order_id", orderId);
 
   const avisos: string[] = [];
+  const chequeos: ChequeoStock[] = [];
   let aplicados = 0;
 
   for (const it of (items ?? []) as ItemPedido[]) {
@@ -369,22 +379,27 @@ export async function ajustarStockPorPedido(
 
     // variante simple / pack: se descuenta su propio stock_real
     const { antes, despues } = await sumarStockVariante(db, variantId, signo * qty);
-    if (signo < 0 && antes < qty)
+    if (signo < 0 && antes < qty) {
       avisos.push(
         `${nombre}: la venta dice ${qty} y figuraba ${antes} — quedó en ${despues}`,
       );
+      chequeos.push({ variantId, trasIncidente: despues });
+    }
     aplicados++;
   }
 
-  return { aplicados, avisos };
+  return { aplicados, avisos, chequeos };
 }
 
-/** Deja un aviso en Inicio para que Elias ajuste stock a mano por un pedido. */
+/** Deja un aviso en Inicio para que Elias ajuste stock a mano por un pedido.
+ *  `chequeos` (si hay) queda guardado en la alerta para poder verificar más
+ *  tarde, con datos reales, si ya se corrigió — ver resolverAlertaManual. */
 export async function avisarStockManual(
   db: DB,
   orderId: string,
   comprador: string | null,
   avisos: string[],
+  chequeos: ChequeoStock[] = [],
 ) {
   if (!avisos.length) return;
   await db
@@ -398,9 +413,83 @@ export async function avisarStockManual(
     severidad: "warn",
     titulo: `Ajustá stock a mano por la venta de ${comprador ?? "un comprador"}`,
     detalle: avisos.slice(0, 3).join(" · "),
+    meta: chequeos.length
+      ? ({ chequeos } as unknown as Database["public"]["Tables"]["alerts"]["Insert"]["meta"])
+      : null,
     entidad_tipo: "ml_order",
     entidad_id: orderId,
   } as Database["public"]["Tables"]["alerts"]["Insert"]);
+}
+
+export interface ResultadoResolverAlerta {
+  resuelta: boolean;
+  motivo?: string;
+}
+
+/**
+ * Borra una alerta "venta_stock_manual" SOLO si se verifica que ya se
+ * corrigió: para cada variante que quedó mal (guardada en `meta.chequeos` al
+ * crear la alerta), el stock real actual tiene que ser mayor al que quedó
+ * justo después del incidente — señal de que Elias ya lo contó/ajustó. Si
+ * alguna variante sigue igual (o la alerta es de antes de este chequeo y no
+ * tiene `meta`), no se borra: se devuelve el motivo para mostrarlo en el panel.
+ */
+export async function resolverAlertaManual(
+  db: DB,
+  alertaId: string,
+): Promise<ResultadoResolverAlerta> {
+  const { data: alerta } = await db
+    .from("alerts")
+    .select("id, tipo, meta, resuelta_at")
+    .eq("id", alertaId)
+    .maybeSingle();
+  if (!alerta || alerta.tipo !== "venta_stock_manual")
+    return { resuelta: false, motivo: "esta alerta no se puede verificar así" };
+  if (alerta.resuelta_at) return { resuelta: true };
+
+  const chequeos = (alerta.meta as { chequeos?: ChequeoStock[] } | null)
+    ?.chequeos;
+  if (!chequeos?.length)
+    return {
+      resuelta: false,
+      motivo:
+        "esta alerta es de antes de este chequeo automático — no puedo verificarla sola, revisá el stock a mano",
+    };
+
+  const { data: vars } = await db
+    .from("product_variants")
+    .select("id, etiqueta, stock_real, products(nombre)")
+    .in(
+      "id",
+      chequeos.map((c) => c.variantId),
+    );
+  const porId = new Map((vars ?? []).map((v) => [v.id, v]));
+
+  const sinCorregir = chequeos.filter((c) => {
+    const v = porId.get(c.variantId);
+    // si ya no existe la variante, no hay nada que verificar en contra
+    return v ? v.stock_real <= c.trasIncidente : false;
+  });
+
+  if (sinCorregir.length) {
+    const nombres = sinCorregir
+      .map((c) => {
+        const v = porId.get(c.variantId);
+        const prod = v?.products as { nombre?: string } | null;
+        return `${prod?.nombre ?? "?"}${v?.etiqueta && v.etiqueta !== "Único" ? ` (${v.etiqueta})` : ""}`;
+      })
+      .join(" · ");
+    return {
+      resuelta: false,
+      motivo: `todavía no ajustaste el stock de: ${nombres}`,
+    };
+  }
+
+  await db
+    .from("alerts")
+    .update({ resuelta_at: new Date().toISOString() })
+    .eq("id", alertaId);
+  return { resuelta: true };
 }
 
 // ---------- push automático del buffer de ML (nunca dejar una publicación en 0) ----------

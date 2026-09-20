@@ -27,9 +27,11 @@ preguntas.get("/", async (c) => {
     .order("preguntada_at", { ascending: false })
     .limit(150);
   if (filter === "pendientes")
-    query = query.in("estado_panel", ["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"]);
+    query = query.in("estado_panel", ["pendiente", "procesando"]);
+  else if (filter === "necesitan")
+    query = query.in("estado_panel", ["necesita_respuesta", "sugerida", "error"]);
   else if (filter === "automaticas") query = query.eq("estado_panel", "respondida_auto");
-  else if (filter === "respondidas")
+  else if (filter === "historial")
     query = query.in("estado_panel", ["respondida_auto", "respondida_manual"]);
   const { data, error } = await query;
   if (error) return c.json({ error: error.message }, 500);
@@ -44,12 +46,14 @@ preguntas.get("/", async (c) => {
     (listings ?? []).map((row: any) => [row.ml_item_id, row]),
   );
   const { data: all } = await db.from("ml_questions").select("estado_panel");
-  const counts = { pendientes: 0, automaticas: 0, respondidas: 0 };
+  const counts = { pendientes: 0, necesitan: 0, automaticas: 0, historial: 0 };
   for (const row of all ?? []) {
-    if (["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"].includes(row.estado_panel))
+    if (["pendiente", "procesando"].includes(row.estado_panel))
       counts.pendientes++;
+    if (["necesita_respuesta", "sugerida", "error"].includes(row.estado_panel))
+      counts.necesitan++;
     if (row.estado_panel === "respondida_auto") counts.automaticas++;
-    if (["respondida_auto", "respondida_manual"].includes(row.estado_panel)) counts.respondidas++;
+    if (["respondida_auto", "respondida_manual"].includes(row.estado_panel)) counts.historial++;
   }
   return c.json({
     preguntas: (data ?? []).map((row: any) => ({
@@ -107,7 +111,11 @@ preguntas.post("/:id/draft", async (c) => {
 });
 
 preguntas.post("/:id/send", async (c) => {
-  const body = await c.req.json<{ answer?: string }>();
+  const body = await c.req.json<{
+    answer?: string;
+    reutilizable?: boolean;
+    temporal?: boolean;
+  }>();
   const db = dbFor(c.env);
   // Ninguna respuesta sale sin la firma de la tienda, ni siquiera una escrita
   // a las apuradas directo en el cuadro final. Si ya la tiene, no se duplica.
@@ -136,14 +144,14 @@ preguntas.post("/:id/send", async (c) => {
       respondida_at: new Date().toISOString(),
     })
     .eq("id", question.id);
-  if (question.respuesta_usuario)
+  if (body.reutilizable)
     await db.from("question_knowledge").insert({
       product_id: question.product_id,
       pregunta: question.pregunta,
       respuesta: answer,
       fuente: "respuesta_manual",
       vigente: true,
-      temporal: false,
+      temporal: Boolean(body.temporal),
       source_question_id: question.id,
       verified_at: new Date().toISOString(),
     });

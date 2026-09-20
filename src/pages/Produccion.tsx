@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Badge, Card, EmptyHint, PageHeader, PrimaryButton } from "@/components/ui";
+import { Badge, Card, EmptyHint, GhostButton, PageHeader, PrimaryButton } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
 
 interface ComponentItem {
@@ -31,12 +31,25 @@ interface Trabajo {
   placas_label: string;
   minutos: number | null;
   para_pedidos: boolean;
+  en_curso: number;
+}
+interface ProductionRun {
+  id: string;
+  component_id: string | null;
+  tipo: "impresion" | "compra";
+  cantidad: number;
+  placas: number | null;
+  estado: string;
+  nota: string | null;
+  created_at: string;
+  components: { nombre: string; unidad: string; origen: string } | null;
 }
 interface ProductionData {
   components: ComponentItem[];
   suggestions: Suggestion[];
   imprimir: Trabajo[];
   encargar: Trabajo[];
+  production_runs: ProductionRun[];
   summary: { faltantes_pedidos: number; piezas_bajas: number };
 }
 
@@ -73,37 +86,52 @@ export function Produccion() {
     if (!selected || Number(quantity) <= 0) return;
     setSaving(true);
     try {
-      await api("/inventario/print", {
+      await api("/inventario/runs", {
         method: "POST",
         body: JSON.stringify({
           component_id: selected.id,
           quantity: Number(quantity),
           plates: Number(plates) || null,
           note: `Impresión de ${selected.nombre}`,
-          idempotency_key: `impresion:${crypto.randomUUID()}`,
+          kind: "impresion",
         }),
       });
       inventory.reload();
     } finally { setSaving(false); }
   }
 
-  // Las piezas de imprenta (photocards) no se imprimen acá: se encargan y, cuando
-  // llegan, se registra la recepción como entrada de inventario.
-  async function registrarRecepcion(trabajo: Trabajo) {
+  // Las piezas de imprenta se registran como encargadas; recién al confirmar su
+  // llegada se suman al stock físico.
+  async function registrarEncargo(trabajo: Trabajo) {
     const cantidad = Number(recepcion[trabajo.component_id] ?? trabajo.sugerido);
     if (!Number.isFinite(cantidad) || cantidad <= 0) return;
     setRecibiendo(trabajo.component_id);
     try {
-      await api("/inventario/print", {
+      await api("/inventario/runs", {
         method: "POST",
         body: JSON.stringify({
           component_id: trabajo.component_id,
           quantity: cantidad,
-          note: `Recepción de imprenta: ${trabajo.nombre}`,
+          note: `Encargo a imprenta: ${trabajo.nombre}`,
           kind: "compra",
-          idempotency_key: `compra:${crypto.randomUUID()}`,
         }),
       });
+      inventory.reload();
+    } finally { setRecibiendo(undefined); }
+  }
+
+  async function terminarRun(run: ProductionRun) {
+    setRecibiendo(run.id);
+    try {
+      await api(`/inventario/runs/${run.id}/complete`, { method: "POST" });
+      inventory.reload();
+    } finally { setRecibiendo(undefined); }
+  }
+
+  async function cancelarRun(run: ProductionRun) {
+    setRecibiendo(run.id);
+    try {
+      await api(`/inventario/runs/${run.id}/cancel`, { method: "POST" });
       inventory.reload();
     } finally { setRecibiendo(undefined); }
   }
@@ -113,6 +141,32 @@ export function Produccion() {
     {inventory.loading && <EmptyHint>Calculando el plan…</EmptyHint>}
     {inventory.error && <EmptyHint>No se pudo cargar: {inventory.error}</EmptyHint>}
     {inventory.data && <>
+      {inventory.data.production_runs.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-3 text-[15px] font-semibold">En curso</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {inventory.data.production_runs.map((run) => (
+              <Card key={run.id}>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[14px] font-semibold">
+                      {run.components?.nombre ?? "Trabajo de producción"}
+                    </div>
+                    <div className="mt-0.5 text-[11.5px] text-ink/45">
+                      {run.tipo === "compra" ? "Encargado" : "Imprimiendo"} · {run.cantidad} {run.components?.unidad ?? "unidades"}
+                      {run.placas ? ` · ${run.placas} placa(s)` : ""}
+                    </div>
+                  </div>
+                  <PrimaryButton disabled={recibiendo === run.id} onClick={() => terminarRun(run)}>
+                    {recibiendo === run.id ? "…" : run.tipo === "compra" ? "Registrar recepción" : "Confirmar terminada"}
+                  </PrimaryButton>
+                  <GhostButton disabled={recibiendo === run.id} onClick={() => cancelarRun(run)}>Cancelar</GhostButton>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="mb-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(340px,.75fr)]">
         <div>
           <h2 className="mb-3 text-[15px] font-semibold">Qué conviene imprimir</h2>
@@ -177,9 +231,9 @@ export function Produccion() {
                       />
                       <PrimaryButton
                         disabled={recibiendo === trabajo.component_id}
-                        onClick={() => registrarRecepcion(trabajo)}
+                        onClick={() => registrarEncargo(trabajo)}
                       >
-                        {recibiendo === trabajo.component_id ? "…" : "Registrar recepción"}
+                        {recibiendo === trabajo.component_id ? "…" : "Marcar encargado"}
                       </PrimaryButton>
                     </div>
                   </Card>
@@ -196,7 +250,7 @@ export function Produccion() {
           {inventory.data.summary.faltantes_pedidos > 0 && <div className="mt-3 rounded-lg bg-danger-bg px-4 py-3 text-[12px] text-danger">Hay {inventory.data.summary.faltantes_pedidos} producto(s) comprometidos que todavía no tienen una unidad terminada reservada.</div>}
         </div>
         <div>
-          <h2 className="mb-3 text-[15px] font-semibold">Registrar una impresión</h2>
+          <h2 className="mb-3 text-[15px] font-semibold">Iniciar una impresión</h2>
           <Card>
             <label className="block text-[11px] font-semibold text-ink/50">Pieza</label>
             <select value={componentId} onChange={(e) => setComponentId(e.target.value)} className="mt-1 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px]">
@@ -208,10 +262,10 @@ export function Produccion() {
             </div>}
             <div className="mt-4 grid grid-cols-2 gap-3">
               <label className="text-[11px] font-semibold text-ink/50">Placas<input inputMode="decimal" value={plates} onChange={(e) => setPlates(e.target.value.replace(/[^0-9.]/g, ""))} className="mt-1 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px]" /></label>
-              <label className="text-[11px] font-semibold text-ink/50">Unidades obtenidas<input inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/\D/g, ""))} className="mt-1 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px]" /></label>
+              <label className="text-[11px] font-semibold text-ink/50">Unidades esperadas<input inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value.replace(/\D/g, ""))} className="mt-1 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px]" /></label>
             </div>
-            <PrimaryButton disabled={saving || !selected} onClick={registerPrint}>{saving ? "Registrando…" : "Confirmar impresión"}</PrimaryButton>
-            <p className="mt-2 text-[10.5px] text-ink/40">Al confirmar, las piezas se suman al inventario y queda registrado el movimiento.</p>
+            <PrimaryButton disabled={saving || !selected} onClick={registerPrint}>{saving ? "Registrando…" : "Iniciar impresión"}</PrimaryButton>
+            <p className="mt-2 text-[10.5px] text-ink/40">Se descuenta del plan para no recomendarla dos veces. Las piezas se suman al inventario recién cuando confirmás que terminó.</p>
           </Card>
         </div>
       </div>

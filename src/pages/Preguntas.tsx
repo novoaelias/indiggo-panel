@@ -4,7 +4,7 @@ import { Badge, Card, EmptyHint, GhostButton, PageHeader, PrimaryButton, cx } fr
 import { api, useApi } from "@/lib/api";
 import { AvisoPush } from "@/components/AvisoPush";
 
-type Filter = "pendientes" | "automaticas" | "respondidas";
+type Filter = "pendientes" | "necesitan" | "automaticas" | "historial";
 interface Question {
   id: string;
   ml_item_id: string;
@@ -22,13 +22,13 @@ interface Question {
 }
 interface QuestionsData {
   preguntas: Question[];
-  counts: { pendientes: number; automaticas: number; respondidas: number };
+  counts: Record<Filter, number>;
 }
 
 export function Preguntas() {
-  const [filter, setFilter] = useState<Filter>("pendientes");
   const [params] = useSearchParams();
   const selectedId = params.get("id");
+  const [filter, setFilter] = useState<Filter>(selectedId ? "necesitan" : "pendientes");
   const questions = useApi<QuestionsData>(`/preguntas?estado=${filter}`);
   const [syncing, setSyncing] = useState(false);
   const data = questions.data;
@@ -46,7 +46,15 @@ export function Preguntas() {
     <PageHeader titulo="Preguntas" subtitulo="Respuestas profesionales con tu conocimiento y el historial de la tienda" acciones={<PrimaryButton disabled={syncing} onClick={sync}>{syncing ? "Sincronizando…" : "Buscar preguntas"}</PrimaryButton>} />
     <AvisoPush />
     <div className="mb-5 flex gap-1 overflow-x-auto rounded-lg bg-ink/[0.05] p-1">
-      {(["pendientes", "automaticas", "respondidas"] as Filter[]).map((value) => <button key={value} onClick={() => setFilter(value)} className={cx("whitespace-nowrap rounded-md px-3 py-2 text-[13px] font-semibold capitalize", filter === value ? "bg-surface shadow-sm" : "text-ink/50")}>{value === "automaticas" ? "Respondidas automáticamente" : value} {data && <span className="ml-1 text-[10px] opacity-60">{data.counts[value]}</span>}</button>)}
+      {(["pendientes", "necesitan", "automaticas", "historial"] as Filter[]).map((value) => {
+        const labels: Record<Filter, string> = {
+          pendientes: "Procesando",
+          necesitan: "Necesitan tu respuesta",
+          automaticas: "Respondidas automáticamente",
+          historial: "Historial",
+        };
+        return <button key={value} onClick={() => setFilter(value)} className={cx("whitespace-nowrap rounded-md px-3 py-2 text-[13px] font-semibold", filter === value ? "bg-surface shadow-sm" : "text-ink/50")}>{labels[value]} {data && <span className="ml-1 text-[10px] opacity-60">{data.counts[value]}</span>}</button>;
+      })}
     </div>
     {questions.loading && <EmptyHint>Cargando preguntas…</EmptyHint>}
     {questions.error && <EmptyHint>No se pudieron cargar: {questions.error}</EmptyHint>}
@@ -60,6 +68,10 @@ export function Preguntas() {
 function QuestionCard({ question, selected, onSaved }: { question: Question; selected: boolean; onSaved: () => void }) {
   const [context, setContext] = useState(question.respuesta_usuario ?? "");
   const [answer, setAnswer] = useState(question.sugerencia ?? question.respuesta ?? "");
+  const [reutilizable, setReutilizable] = useState(
+    !question.motivo_revision?.includes("compromiso"),
+  );
+  const [temporal, setTemporal] = useState(false);
   const [working, setWorking] = useState<"draft" | "literal" | "send" | null>(null);
   const pending = ["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"].includes(question.estado_panel);
   const productName = question.products?.nombre_interno || question.products?.nombre || question.listing?.titulo || question.ml_item_id;
@@ -84,7 +96,10 @@ function QuestionCard({ question, selected, onSaved }: { question: Question; sel
     if (!answer.trim()) return;
     setWorking("send");
     try {
-      await api(`/preguntas/${question.id}/send`, { method: "POST", body: JSON.stringify({ answer }) });
+      await api(`/preguntas/${question.id}/send`, {
+        method: "POST",
+        body: JSON.stringify({ answer, reutilizable, temporal }),
+      });
       onSaved();
     } finally { setWorking(null); }
   }
@@ -102,7 +117,7 @@ function QuestionCard({ question, selected, onSaved }: { question: Question; sel
           <GhostButton disabled={working !== null || !context.trim()} onClick={() => draft(true)}>{working === "literal" ? "Copiando…" : "Usar mi texto"}</GhostButton>
           <span className="text-[10.5px] text-ink/40">Corrige la redacción sin sacar datos ni cambiar tu tono, y firma como Indiggo Store.</span>
         </div>
-        {(answer || question.sugerencia) && <div className="mt-4"><label className="block text-[11.5px] font-semibold">Respuesta final<textarea value={answer} maxLength={2000} onChange={(e) => setAnswer(e.target.value)} className="mt-1 min-h-24 w-full rounded-lg border border-accent/30 bg-accent-soft/40 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label><div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-ink/35">{answer.length}/2000</span><PrimaryButton disabled={working !== null || !answer.trim()} onClick={send}>{working === "send" ? "Enviando…" : "Enviar a Mercado Libre"}</PrimaryButton></div></div>}
+        {(answer || question.sugerencia) && <div className="mt-4"><label className="block text-[11.5px] font-semibold">Respuesta final<textarea value={answer} maxLength={2000} onChange={(e) => setAnswer(e.target.value)} className="mt-1 min-h-24 w-full rounded-lg border border-accent/30 bg-accent-soft/40 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label><div className="mt-3 flex flex-wrap gap-4 text-[11.5px] text-ink/55"><label className="flex items-center gap-2"><input type="checkbox" checked={reutilizable} onChange={(e) => setReutilizable(e.target.checked)} />Guardar para responder preguntas parecidas</label>{reutilizable && <label className="flex items-center gap-2"><input type="checkbox" checked={temporal} onChange={(e) => setTemporal(e.target.checked)} />Vale sólo por 24 horas</label>}</div><div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-ink/35">{answer.length}/2000</span><PrimaryButton disabled={working !== null || !answer.trim()} onClick={send}>{working === "send" ? "Enviando…" : "Enviar a Mercado Libre"}</PrimaryButton></div></div>}
       </div> : <div className="mt-4 rounded-lg bg-ink/[0.025] px-4 py-3 text-[13px] leading-relaxed">{question.respuesta}</div>}
     </div>
   </Card>;

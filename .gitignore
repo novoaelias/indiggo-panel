@@ -11,6 +11,7 @@ bubbly-realm-*.json
 *service_account*.json
 gcp-*.json
 .wrangler
+supabase/.temp/
 *.local
 .DS_Store
 npm-debug.log*

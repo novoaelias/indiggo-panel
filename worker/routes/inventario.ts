@@ -26,7 +26,7 @@ const key = (prefix: string) =>
 
 inventario.get("/", async (c) => {
   const db = loose(c.env);
-  const [variantsR, componentsR, recipesR, reservationsR, movementsR, ml] =
+  const [variantsR, componentsR, recipesR, reservationsR, movementsR, runsR, ml] =
     await Promise.all([
       db
         .from("product_variants")
@@ -55,10 +55,24 @@ inventario.get("/", async (c) => {
         )
         .order("created_at", { ascending: false })
         .limit(50),
+      db
+        .from("production_runs")
+        .select(
+          "id,component_id,product_variant_id,tipo,cantidad,placas,estado,nota,created_at,components(nombre,unidad,origen),product_variants(etiqueta,products(nombre,nombre_interno))",
+        )
+        .in("estado", ["pendiente", "en_proceso"])
+        .order("created_at"),
       publicadoEnML(supa(c.env)),
     ]);
 
-  for (const r of [variantsR, componentsR, recipesR, reservationsR, movementsR])
+  for (const r of [
+    variantsR,
+    componentsR,
+    recipesR,
+    reservationsR,
+    movementsR,
+    runsR,
+  ])
     if (r.error) return c.json({ error: r.error.message }, 500);
 
   const components = componentsR.data ?? [];
@@ -127,6 +141,13 @@ inventario.get("/", async (c) => {
   const suggestions = allocateAssemblySuggestions(variants, stockPorPieza);
 
   // Qué reponer: impresiones 3D por un lado, encargos a la imprenta por otro.
+  const enCursoPorPieza = new Map<string, number>();
+  for (const run of runsR.data ?? [])
+    if (run.component_id)
+      enCursoPorPieza.set(
+        run.component_id,
+        (enCursoPorPieza.get(run.component_id) ?? 0) + run.cantidad,
+      );
   const trabajos = planPiezas(
     variants,
     components.map((x: any) => ({
@@ -134,7 +155,9 @@ inventario.get("/", async (c) => {
       nombre: x.nombre,
       unidad: x.unidad,
       origen: x.origen,
-      stock_real: x.stock_real,
+      // Para planificar, lo iniciado cuenta como reposición comprometida, pero
+      // no como stock físico: sólo se suma al inventario al completar el trabajo.
+      stock_real: x.stock_real + (enCursoPorPieza.get(x.id) ?? 0),
       stock_minimo: x.stock_minimo,
       rinde_por_placa: x.rinde_por_placa,
       minutos_placa: x.minutos_placa,
@@ -143,12 +166,19 @@ inventario.get("/", async (c) => {
     redondearPlaca,
   );
 
+  const conEnCurso = (t: any) => ({
+    ...t,
+    stock_real: componentById.get(t.component_id)?.stock_real ?? t.stock_real,
+    en_curso: enCursoPorPieza.get(t.component_id) ?? 0,
+  });
+
   return c.json({
     variants,
     components,
     suggestions,
-    imprimir: trabajos.filter((t) => t.origen === "impresora3d"),
-    encargar: trabajos.filter((t) => t.origen !== "impresora3d"),
+    imprimir: trabajos.filter((t) => t.origen === "impresora3d").map(conEnCurso),
+    encargar: trabajos.filter((t) => t.origen !== "impresora3d").map(conEnCurso),
+    production_runs: runsR.data ?? [],
     movements: movementsR.data ?? [],
     summary: {
       productos: variants.length,
@@ -217,6 +247,92 @@ inventario.post("/print", async (c) => {
   });
   if (error) return c.json({ error: error.message }, 409);
   return c.json({ ok: true, operation_id: data });
+});
+
+inventario.post("/runs", async (c) => {
+  const body = await c.req.json<{
+    component_id?: string;
+    quantity?: number;
+    plates?: number | null;
+    kind?: "impresion" | "compra";
+    note?: string;
+  }>();
+  if (
+    !body.component_id ||
+    !Number.isInteger(body.quantity) ||
+    (body.quantity ?? 0) <= 0
+  )
+    return c.json({ error: "trabajo de producción inválido" }, 400);
+  const tipo = body.kind === "compra" ? "compra" : "impresion";
+  const { data, error } = await loose(c.env)
+    .from("production_runs")
+    .insert({
+      component_id: body.component_id,
+      tipo,
+      cantidad: body.quantity,
+      placas: body.plates ?? null,
+      estado: "en_proceso",
+      nota: body.note?.trim() || null,
+    })
+    .select("id")
+    .single();
+  if (error) return c.json({ error: error.message }, 409);
+  return c.json({ ok: true, run_id: data?.id });
+});
+
+inventario.post("/runs/:id/complete", async (c) => {
+  const db = loose(c.env);
+  const id = c.req.param("id");
+  const { data: run, error: readError } = await db
+    .from("production_runs")
+    .select("id,component_id,tipo,cantidad,placas,estado,nota,operation_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (readError) return c.json({ error: readError.message }, 500);
+  if (!run) return c.json({ error: "trabajo inexistente" }, 404);
+  if (run.estado === "terminada")
+    return c.json({ ok: true, operation_id: run.operation_id, ya: true });
+  if (!run.component_id || !["impresion", "compra"].includes(run.tipo))
+    return c.json({ error: "este trabajo no se puede completar así" }, 409);
+
+  const { data: operationId, error } = await db.rpc("inventory_register_print", {
+    p_component_id: run.component_id,
+    p_quantity: run.cantidad,
+    p_plates: run.placas ?? null,
+    p_note: run.nota ?? "",
+    p_idempotency_key: `produccion:${id}`,
+    p_kind: run.tipo,
+  });
+  if (error) return c.json({ error: error.message }, 409);
+
+  // El RPC conserva compatibilidad creando su propia fila terminada. Unificamos
+  // esa fila con el trabajo iniciado; si la petición se repite, la operación es
+  // idempotente y este bloque deja el mismo resultado.
+  await db
+    .from("production_runs")
+    .delete()
+    .eq("operation_id", operationId)
+    .neq("id", id);
+  const { error: updateError } = await db
+    .from("production_runs")
+    .update({
+      estado: "terminada",
+      operation_id: operationId,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+  if (updateError) return c.json({ error: updateError.message }, 500);
+  return c.json({ ok: true, operation_id: operationId });
+});
+
+inventario.post("/runs/:id/cancel", async (c) => {
+  const { error } = await loose(c.env)
+    .from("production_runs")
+    .update({ estado: "cancelada", completed_at: new Date().toISOString() })
+    .eq("id", c.req.param("id"))
+    .in("estado", ["pendiente", "en_proceso"]);
+  if (error) return c.json({ error: error.message }, 409);
+  return c.json({ ok: true });
 });
 
 inventario.post("/assemble", async (c) => {

@@ -272,13 +272,32 @@ export async function processQuestion(
     .eq("question_id", questionId);
 
   try {
-    const [{ data: product }, { data: history }, { data: allKnowledge }, { data: allFacts }] =
+    const [
+      { data: product },
+      { data: listing },
+      { data: variants },
+      { data: history },
+      { data: allKnowledge },
+      { data: allFacts },
+    ] =
       await Promise.all([
         db
           .from("products")
           .select("nombre,nombre_interno,notas")
           .eq("id", question.product_id)
           .maybeSingle(),
+        db
+          .from("ml_listings")
+          .select("titulo,precio,moneda,cantidad_ml,raw")
+          .eq("ml_item_id", question.ml_item_id)
+          .maybeSingle(),
+        db
+          .from("product_variants")
+          .select(
+            "etiqueta,variant_components(cantidad,notas,components(nombre,unidad,equivalencia,color))",
+          )
+          .eq("product_id", question.product_id)
+          .eq("activo", true),
         db
           .from("ml_questions")
           .select("id,pregunta,respuesta,preguntada_at")
@@ -319,7 +338,43 @@ export async function processQuestion(
     const factList = (facts ?? [])
       .filter((row: any) => !CLAVES_DE_ESTILO.includes(row.clave))
       .filter(freshEnough);
-    const enoughEvidence = best >= 0.55 || (best >= 0.35 && factList.length > 0);
+    const recetasVerificadas = (variants ?? []).flatMap((variant: any) =>
+      (variant.variant_components ?? []).map((line: any) => ({
+        variante: variant.etiqueta,
+        pieza: line.components?.nombre,
+        cantidad: line.cantidad,
+        unidad: line.components?.unidad,
+        equivalencia: line.components?.equivalencia,
+        color: line.components?.color,
+        notas: line.notas,
+      })),
+    );
+    const atributosPublicacion = Array.isArray((listing?.raw as any)?.attributes)
+      ? (listing.raw as any).attributes
+          .filter((attr: any) => attr?.name && attr?.value_name)
+          .slice(0, 20)
+          .map((attr: any) => `${attr.name}: ${attr.value_name}`)
+      : [];
+    const textoVerificado = [
+      product?.nombre_interno,
+      product?.nombre,
+      product?.notas,
+      listing?.titulo,
+      ...atributosPublicacion,
+      ...recetasVerificadas.flatMap((line: any) => [
+        line.variante,
+        line.pieza,
+        line.equivalencia,
+        line.notas,
+      ]),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const scoreProducto = similitud(question.pregunta, textoVerificado);
+    const enoughEvidence =
+      best >= 0.55 ||
+      (best >= 0.35 && factList.length > 0) ||
+      (scoreProducto >= 0.2 && Boolean(product || listing));
     const contradictory = hayContradiccion(candidates);
 
     if (risky || !enoughEvidence || contradictory) {
@@ -363,7 +418,17 @@ export async function processQuestion(
           role: "user",
           content: JSON.stringify({
             producto: product?.nombre_interno || product?.nombre,
-            notas_producto: product?.notas,
+            ficha_producto: product?.notas,
+            publicacion_actual: listing
+              ? {
+                  titulo: listing.titulo,
+                  precio: listing.precio,
+                  moneda: listing.moneda,
+                  cantidad_publicada: listing.cantidad_ml,
+                  atributos: atributosPublicacion,
+                }
+              : null,
+            recetas_verificadas: recetasVerificadas,
             pregunta: question.pregunta,
             datos_verificados: factList,
             ejemplos_relevantes: candidates,

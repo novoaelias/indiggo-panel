@@ -1,0 +1,104 @@
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { Badge, Card, EmptyHint, GhostButton, PageHeader, PrimaryButton, cx } from "@/components/ui";
+import { api, useApi } from "@/lib/api";
+import { AvisoPush } from "@/components/AvisoPush";
+
+type Filter = "pendientes" | "automaticas" | "respondidas";
+interface Question {
+  id: string;
+  ml_item_id: string;
+  pregunta: string;
+  respuesta: string | null;
+  estado_panel: string;
+  sugerencia: string | null;
+  motivo_revision: string | null;
+  respuesta_usuario: string | null;
+  automatico: boolean;
+  preguntada_at: string;
+  respondida_at: string | null;
+  products: { nombre: string; nombre_interno: string | null } | null;
+  listing: { titulo: string; thumbnail: string | null; permalink: string | null } | null;
+}
+interface QuestionsData {
+  preguntas: Question[];
+  counts: { pendientes: number; automaticas: number; respondidas: number };
+}
+
+export function Preguntas() {
+  const [filter, setFilter] = useState<Filter>("pendientes");
+  const [params] = useSearchParams();
+  const selectedId = params.get("id");
+  const questions = useApi<QuestionsData>(`/preguntas?estado=${filter}`);
+  const [syncing, setSyncing] = useState(false);
+  const data = questions.data;
+  useEffect(() => {
+    if (!selectedId || !data) return;
+    document.getElementById(`pregunta-${selectedId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [selectedId, data]);
+
+  async function sync() {
+    setSyncing(true);
+    try { await api("/preguntas/sync", { method: "POST" }); questions.reload(); }
+    finally { setSyncing(false); }
+  }
+  return <div>
+    <PageHeader titulo="Preguntas" subtitulo="Respuestas profesionales con tu conocimiento y el historial de la tienda" acciones={<PrimaryButton disabled={syncing} onClick={sync}>{syncing ? "Sincronizando…" : "Buscar preguntas"}</PrimaryButton>} />
+    <AvisoPush />
+    <div className="mb-5 flex gap-1 overflow-x-auto rounded-lg bg-ink/[0.05] p-1">
+      {(["pendientes", "automaticas", "respondidas"] as Filter[]).map((value) => <button key={value} onClick={() => setFilter(value)} className={cx("whitespace-nowrap rounded-md px-3 py-2 text-[13px] font-semibold capitalize", filter === value ? "bg-surface shadow-sm" : "text-ink/50")}>{value === "automaticas" ? "Respondidas automáticamente" : value} {data && <span className="ml-1 text-[10px] opacity-60">{data.counts[value]}</span>}</button>)}
+    </div>
+    {questions.loading && <EmptyHint>Cargando preguntas…</EmptyHint>}
+    {questions.error && <EmptyHint>No se pudieron cargar: {questions.error}</EmptyHint>}
+    <div className="flex flex-col gap-4">
+      {data?.preguntas.map((question) => <QuestionCard key={question.id} question={question} selected={question.id === selectedId} onSaved={questions.reload} />)}
+      {data && data.preguntas.length === 0 && <EmptyHint>{filter === "pendientes" ? "No hay preguntas pendientes." : "Todavía no hay preguntas en esta vista."}</EmptyHint>}
+    </div>
+  </div>;
+}
+
+function QuestionCard({ question, selected, onSaved }: { question: Question; selected: boolean; onSaved: () => void }) {
+  const [context, setContext] = useState(question.respuesta_usuario ?? "");
+  const [answer, setAnswer] = useState(question.sugerencia ?? question.respuesta ?? "");
+  const [working, setWorking] = useState<"draft" | "send" | null>(null);
+  const pending = ["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"].includes(question.estado_panel);
+  const productName = question.products?.nombre_interno || question.products?.nombre || question.listing?.titulo || question.ml_item_id;
+  const status = useMemo(() => {
+    if (question.estado_panel === "respondida_auto") return <Badge tono="ok">Respondida automáticamente</Badge>;
+    if (question.estado_panel === "respondida_manual") return <Badge tono="neutral">Respondida por vos</Badge>;
+    if (question.estado_panel === "procesando" || question.estado_panel === "pendiente") return <Badge tono="info">Preparando</Badge>;
+    if (question.estado_panel === "error") return <Badge tono="danger">Error</Badge>;
+    return <Badge tono="warn">Necesita tu ayuda</Badge>;
+  }, [question.estado_panel]);
+  async function draft() {
+    if (!context.trim()) return;
+    setWorking("draft");
+    try {
+      const result = await api<{ suggestion: string }>(`/preguntas/${question.id}/draft`, { method: "POST", body: JSON.stringify({ context }) });
+      setAnswer(result.suggestion);
+    } finally { setWorking(null); }
+  }
+  async function send() {
+    if (!answer.trim()) return;
+    setWorking("send");
+    try {
+      await api(`/preguntas/${question.id}/send`, { method: "POST", body: JSON.stringify({ answer }) });
+      onSaved();
+    } finally { setWorking(null); }
+  }
+  return <Card className={cx(selected && "ring-2 ring-accent")}>
+    <div id={`pregunta-${question.id}`} className="scroll-mt-24">
+      <div className="flex items-start gap-3">
+        {question.listing?.thumbnail && <img src={question.listing.thumbnail} alt="" className="h-12 w-12 rounded-lg object-cover" />}
+        <div className="min-w-0 flex-1"><div className="text-[11px] text-ink/40">{productName} · {new Date(question.preguntada_at).toLocaleString("es-AR")}</div><div className="mt-1 text-[15px] font-semibold leading-snug">{question.pregunta}</div></div>{status}
+      </div>
+      {question.motivo_revision && <div className="mt-3 rounded-lg bg-warn-bg px-3 py-2 text-[11.5px] text-warn">{question.motivo_revision}</div>}
+      {pending ? <div className="mt-4 border-t pt-4 hairline">
+        <label className="block text-[11.5px] font-semibold">Decime el dato que falta<textarea value={context} onChange={(e) => setContext(e.target.value)} placeholder="Ej.: sí, lo hacemos en negro y tarda dos días…" className="mt-1 min-h-20 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label>
+        <GhostButton disabled={working !== null || !context.trim()} onClick={draft}>{working === "draft" ? "Redactando…" : "Redactar mejor"}</GhostButton>
+        {(answer || question.sugerencia) && <div className="mt-4"><label className="block text-[11.5px] font-semibold">Respuesta final<textarea value={answer} maxLength={2000} onChange={(e) => setAnswer(e.target.value)} className="mt-1 min-h-24 w-full rounded-lg border border-accent/30 bg-accent-soft/40 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label><div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-ink/35">{answer.length}/2000</span><PrimaryButton disabled={working !== null || !answer.trim()} onClick={send}>{working === "send" ? "Enviando…" : "Enviar a Mercado Libre"}</PrimaryButton></div></div>}
+      </div> : <div className="mt-4 rounded-lg bg-ink/[0.025] px-4 py-3 text-[13px] leading-relaxed">{question.respuesta}</div>}
+    </div>
+  </Card>;
+}
+

@@ -8,6 +8,7 @@ import {
   PrimaryButton,
 } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
+import { enablePush } from "@/lib/push";
 
 interface Integrante {
   id: string;
@@ -30,15 +31,194 @@ export function Configuracion() {
         subtitulo="Administrá las conexiones y preferencias de tu tienda"
       />
       <div className="mb-6 flex flex-wrap gap-2" role="group" aria-label="Secciones de configuración">
-        {[["conexion", "Conexiones"], ["envios", "Envíos"], ["catalogo", "Catálogo"], ["grupos", "Grupos e integrantes"]].map(([id, label]) => <button key={id} aria-pressed={seccion === id} onClick={() => setSeccion(id)} className={seccion === id ? "rounded-lg bg-accent-soft px-4 py-2 text-accent font-semibold" : "rounded-lg px-4 py-2 text-ink/60"}>{label}</button>)}
+        {[["conexion", "Conexiones"], ["reglas", "Reglas comerciales"], ["notificaciones", "Notificaciones"], ["envios", "Envíos"], ["catalogo", "Catálogo"], ["grupos", "Grupos e integrantes"]].map(([id, label]) => <button key={id} aria-pressed={seccion === id} onClick={() => setSeccion(id)} className={seccion === id ? "rounded-lg bg-accent-soft px-4 py-2 text-accent font-semibold" : "rounded-lg px-4 py-2 text-ink/60"}>{label}</button>)}
       </div>
       <div className="flex flex-col gap-8">
         {seccion === "conexion" && <><MercadoLibreSection /><ConexionesSection /></>}
+        {seccion === "reglas" && <ReglasSection />}
+        {seccion === "notificaciones" && <NotificacionesSection />}
         {seccion === "envios" && <><FlexSection /><PlanillaRepartoSection /></>}
         {seccion === "catalogo" && <><CatalogoSection /><details className="secondary-section"><summary>Unir publicaciones del mismo producto</summary><UnirPublicacionesSection /></details></>}
         {seccion === "grupos" && <GruposSection />}
       </div>
     </div>
+  );
+}
+
+interface Regla {
+  id: string;
+  clave: string;
+  valor: string;
+  temporal: boolean;
+  product_id: string | null;
+  producto: string;
+}
+
+/** Datos que la IA puede dar por ciertos al responder una pregunta. */
+function ReglasSection() {
+  const { data, reload } = useApi<{
+    reglas: Regla[];
+    productos: Array<{ id: string; nombre: string }>;
+  }>("/preguntas/reglas");
+  const [clave, setClave] = useState("");
+  const [valor, setValor] = useState("");
+  const [producto, setProducto] = useState("");
+  const [temporal, setTemporal] = useState(false);
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function guardar() {
+    if (!clave.trim() || !valor.trim()) return;
+    setGuardando(true);
+    setError(undefined);
+    try {
+      await api("/preguntas/reglas", {
+        method: "POST",
+        body: JSON.stringify({
+          clave: clave.trim(),
+          valor: valor.trim(),
+          product_id: producto || null,
+          temporal,
+        }),
+      });
+      setClave("");
+      setValor("");
+      setTemporal(false);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Reglas comerciales</h2>
+      <Card>
+        <div className="max-w-2xl space-y-4 text-[13.5px]">
+          <p className="text-ink/65">
+            Lo que la IA puede afirmar sin consultarte: qué incluye un pack, cómo
+            se envía, qué no hacés. Marcá “temporal” para algo que vale por hoy
+            (una promo, una demora): deja de usarse solo a las 24 horas.
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              className="rounded-lg border hairline bg-surface px-3 py-2"
+              placeholder="Tema (ej. envíos)"
+              value={clave}
+              onChange={(e) => setClave(e.target.value)}
+            />
+            <select
+              className="rounded-lg border hairline bg-surface px-3 py-2"
+              value={producto}
+              onChange={(e) => setProducto(e.target.value)}
+            >
+              <option value="">Todos los productos</option>
+              {(data?.productos ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.nombre}
+                </option>
+              ))}
+            </select>
+          </div>
+          <textarea
+            className="w-full rounded-lg border hairline bg-surface px-3 py-2"
+            rows={2}
+            placeholder="Qué decir (ej. Despacho dentro de las 24 h hábiles por Mercado Envíos)"
+            value={valor}
+            onChange={(e) => setValor(e.target.value)}
+          />
+          <label className="flex items-center gap-2 text-ink/65">
+            <input
+              type="checkbox"
+              checked={temporal}
+              onChange={(e) => setTemporal(e.target.checked)}
+            />
+            Es temporal (vale 24 horas)
+          </label>
+          {error && <div className="rounded-lg bg-warn-bg px-3 py-2 text-warn">{error}</div>}
+          <PrimaryButton onClick={guardar} disabled={guardando}>
+            {guardando ? "Guardando…" : "Agregar regla"}
+          </PrimaryButton>
+
+          <div className="divide-y hairline border-t hairline pt-1">
+            {(data?.reglas ?? []).length === 0 && (
+              <div className="py-3 text-ink/50">Todavía no cargaste reglas.</div>
+            )}
+            {(data?.reglas ?? []).map((r) => (
+              <div key={r.id} className="flex items-start gap-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold">
+                    {r.clave}
+                    {r.temporal && <span className="ml-2 text-[11.5px] text-warn">temporal</span>}
+                  </div>
+                  <div className="text-ink/65 [overflow-wrap:anywhere]">{r.valor}</div>
+                  <div className="text-[11.5px] text-ink/45">{r.producto}</div>
+                </div>
+                <GhostButton
+                  onClick={async () => {
+                    await api(`/preguntas/reglas/${r.id}`, { method: "DELETE" });
+                    reload();
+                  }}
+                >
+                  Borrar
+                </GhostButton>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+    </section>
+  );
+}
+
+function NotificacionesSection() {
+  const { data } = useApi<{ configured: boolean }>("/preguntas/push/config");
+  const [mensaje, setMensaje] = useState<string>();
+  const [activando, setActivando] = useState(false);
+
+  async function activar() {
+    setActivando(true);
+    try {
+      const estado = await enablePush();
+      setMensaje(
+        estado === "enabled"
+          ? "Notificaciones activadas en este dispositivo."
+          : "Falta configurar Web Push en el servidor.",
+      );
+    } catch (error) {
+      setMensaje((error as Error).message);
+    } finally {
+      setActivando(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Notificaciones en el iPhone</h2>
+      <Card>
+        <div className="max-w-2xl space-y-3 text-[13.5px] text-ink/65">
+          <p>
+            Recibí avisos cuando una pregunta necesite tu intervención o cuando falle una respuesta automática.
+          </p>
+          <ol className="list-decimal space-y-1 pl-5">
+            <li>Abrí este panel en Safari.</li>
+            <li>Tocá Compartir y elegí “Agregar a Inicio”.</li>
+            <li>Abrí Indiggo desde el icono y activá las notificaciones.</li>
+          </ol>
+          {data && !data.configured && (
+            <div className="rounded-lg bg-warn-bg px-3 py-2 text-warn">
+              El servidor todavía no tiene las claves Web Push configuradas.
+            </div>
+          )}
+          {mensaje && <div className="rounded-lg bg-accent-soft px-3 py-2 text-accent">{mensaje}</div>}
+          <PrimaryButton onClick={activar} disabled={activando || data?.configured === false}>
+            {activando ? "Activando…" : "Activar notificaciones"}
+          </PrimaryButton>
+        </div>
+      </Card>
+    </section>
   );
 }
 
@@ -480,30 +660,6 @@ function CatalogoSection() {
   }>("/catalogo/resumen");
   const [corriendo, setCorriendo] = useState(false);
   const [msg, setMsg] = useState<string>();
-  const [bom, setBom] = useState(false);
-  const [bomMsg, setBomMsg] = useState<string>();
-
-  async function armarBom() {
-    setBom(true);
-    setBomMsg(undefined);
-    try {
-      const r = await api<{
-        cuerpos: number;
-        llaveros: number;
-        photocards: number;
-        packs: number;
-        vinculos: number;
-      }>("/catalogo/derivar-bom", { method: "POST" });
-      setBomMsg(
-        `${r.cuerpos} cuerpos 3D + ${r.llaveros} llaveros 3D + ${r.photocards} photocards + ${r.packs} packs, ${r.vinculos} vínculos`,
-      );
-      reload();
-    } catch (e) {
-      setBomMsg((e as Error).message);
-    } finally {
-      setBom(false);
-    }
-  }
 
   async function derivar() {
     setCorriendo(true);
@@ -557,19 +713,14 @@ function CatalogoSection() {
           <Mini label="Insumos" value={String(data?.insumos ?? "—")} />
         </div>
         {msg && <div className="mb-3 text-[12.5px] text-ink/60">{msg}</div>}
-        {bomMsg && <div className="mb-3 text-[12.5px] text-ink/60">{bomMsg}</div>}
         <div className="flex flex-wrap gap-2.5">
           <PrimaryButton onClick={derivar}>
             {corriendo ? "Derivando…" : "Derivar desde publicaciones"}
           </PrimaryButton>
-          <GhostButton onClick={armarBom}>
-            {bom ? "Armando…" : "Armar lista de materiales"}
-          </GhostButton>
         </div>
         <p className="mt-3 text-[11.5px] text-ink/40">
-          La lista de materiales asume 1 cuerpo impreso en 3D + 1 photocard de
-          imprenta por cada variante de holder. Ajustá las cantidades reales en
-          Stock → Insumos.
+          Los nombres internos y las recetas quedan protegidos. Podés editar cada
+          receta desde Inventario → Productos terminados.
         </p>
         {loading && (
           <span className="ml-3 text-[12.5px] text-ink/40">cargando…</span>
@@ -638,7 +789,7 @@ function UnirPublicacionesSection() {
         },
       );
       setMsg(
-        `Unidas ${ids.length} publicaciones. Ahora hay ${r.resumen?.productos_total ?? "?"} productos. Corré “Armar lista de materiales” si tocaste holders.`,
+        `Unidas ${ids.length} publicaciones. Ahora hay ${r.resumen?.productos_total ?? "?"} productos. Revisá las recetas desde Inventario si tocaste holders.`,
       );
       setSel(new Set());
       setPrincipal("");

@@ -12,6 +12,14 @@ interface MetricasData {
   pedidos_prev: number;
   por_dia: Array<{ dia: string; monto: number; pedidos: number }>;
   top: Array<{ nombre: string; unidades: number; ingreso: number }>;
+  preguntas: {
+    respondidas: number;
+    automaticas: number;
+    porcentaje_automaticas: number;
+    pendientes: number;
+    horas_respuesta: number | null;
+  };
+  inventario: { unidades_faltantes: number; variantes_sin_libres: number };
 }
 
 function delta(actual: number, prev: number): string | null {
@@ -71,6 +79,35 @@ export function Metricas() {
               label="Pedidos"
               value={String(data.pedidos)}
               delta={delta(data.pedidos, data.pedidos_prev)}
+            />
+          </div>
+
+          <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-5">
+            <Kpi
+              label="Preguntas respondidas"
+              value={String(data.preguntas.respondidas)}
+            />
+            <Kpi
+              label="Respuestas automáticas"
+              value={`${data.preguntas.porcentaje_automaticas}%`}
+            />
+            <Kpi
+              label="Tiempo de respuesta"
+              value={
+                data.preguntas.horas_respuesta == null
+                  ? "—"
+                  : data.preguntas.horas_respuesta < 1
+                    ? `${Math.round(data.preguntas.horas_respuesta * 60)} min`
+                    : `${data.preguntas.horas_respuesta} h`
+              }
+            />
+            <Kpi
+              label="Preguntas pendientes"
+              value={String(data.preguntas.pendientes)}
+            />
+            <Kpi
+              label="Unidades faltantes"
+              value={String(data.inventario.unidades_faltantes)}
             />
           </div>
 

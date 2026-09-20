@@ -94,3 +94,18 @@ export function IconMenu({ className }: P) {
     </svg>
   );
 }
+export function IconPreguntas({ className }: P) {
+  return (
+    <svg className={className ?? base} viewBox="0 0 20 20" fill="none">
+      <path d="M3 4.5A2.5 2.5 0 0 1 5.5 2h9A2.5 2.5 0 0 1 17 4.5v6a2.5 2.5 0 0 1-2.5 2.5H9l-4.5 4v-4A2.5 2.5 0 0 1 2 10.5v-6Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M7 6h6M7 9h4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+export function IconProduccion({ className }: P) {
+  return (
+    <svg className={className ?? base} viewBox="0 0 20 20" fill="none">
+      <path d="M4 3v14M4 13h12v4H4M7 13V9l4 2V7l5 3v3" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}

@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { derivarCatalogo } from "../lib/derivar";
-import { derivarBOM } from "../lib/bom";
 
 export const catalogo = new Hono<{ Bindings: Env }>();
 
@@ -38,17 +37,11 @@ catalogo.get("/resumen", async (c) => {
   });
 });
 
-// Arma automáticamente la lista de materiales de los holders con variante por
-// integrante (1 cuerpo 3D + 1 llavero 3D propio del holder + 1 photocard de
-// imprenta por variante) y de los packs de mostacillas / letras (receta fija).
-// También carga los tiempos de impresión por placa. Idempotente.
 catalogo.post("/derivar-bom", async (c) => {
-  const db = supa(c.env);
-  try {
-    return c.json(await derivarBOM(db));
-  } catch (e) {
-    return c.json({ error: (e as Error).message }, 500);
-  }
+  return c.json(
+    { error: "La reconstrucción automática fue desactivada. Editá las recetas desde Inventario." },
+    410,
+  );
 });
 
 // ---------------- Agrupar publicaciones (mismo producto físico) ----------------

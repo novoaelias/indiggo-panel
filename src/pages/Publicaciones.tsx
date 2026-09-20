@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Badge,
   Card,
@@ -32,6 +32,8 @@ interface CategoriaAnalisis {
 }
 interface PublicacionApi {
   id: string;
+  product_id: string | null;
+  producto_nombre: string;
   ml_item_id: string;
   titulo: string;
   estado: string;
@@ -139,6 +141,20 @@ export function Publicaciones() {
   );
   const publicacionesVisibles =
     filtro === "categoria" ? problemas : (data?.publicaciones ?? []);
+  const gruposVisibles = useMemo(() => {
+    const grupos = new Map<string, PublicacionApi[]>();
+    for (const publicacion of publicacionesVisibles) {
+      const key = publicacion.product_id ?? `sin:${publicacion.id}`;
+      const grupo = grupos.get(key) ?? [];
+      grupo.push(publicacion);
+      grupos.set(key, grupo);
+    }
+    return [...grupos.entries()].map(([id, publicaciones]) => ({
+      id,
+      nombre: publicaciones[0]?.producto_nombre ?? "Sin agrupar",
+      publicaciones,
+    }));
+  }, [publicacionesVisibles]);
 
   return (
     <div>
@@ -267,7 +283,15 @@ export function Publicaciones() {
 
       {data && (
         <Card padding={false} className="listing-list">
-          {publicacionesVisibles.map((p) => {
+          {gruposVisibles.map((grupo) => (
+            <Fragment key={grupo.id}>
+              <div className="border-b hairline bg-ink/[0.025] px-4 py-2.5">
+                <div className="text-[13px] font-bold text-ink/80">{grupo.nombre}</div>
+                <div className="text-[11.5px] text-ink/45">
+                  {grupo.publicaciones.length} {grupo.publicaciones.length === 1 ? "publicación vinculada" : "publicaciones vinculadas"}
+                </div>
+              </div>
+              {grupo.publicaciones.map((p) => {
             const meta = ESTADO_META[p.estado] ?? {
               label: p.estado,
               tono: "neutral" as EstadoTono,
@@ -331,7 +355,9 @@ export function Publicaciones() {
                 </div></details>
               </div>
             );
-          })}
+              })}
+            </Fragment>
+          ))}
           {publicacionesVisibles.length === 0 && (
             <div className="px-4 py-8 text-center text-[13.5px] text-ink/45">
               {filtro === "categoria"

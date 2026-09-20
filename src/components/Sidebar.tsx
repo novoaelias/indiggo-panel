@@ -10,7 +10,7 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
     <nav className="flex flex-col gap-0.5">
       {NAV.map(({ to, label, icon: Icon }, index) => (
         <Fragment key={to}>
-        {(index === 0 || index === 4) && <div className="nav-section">{index === 0 ? "Tu día a día" : "Herramientas"}</div>}
+        {(index === 0 || index === 6) && <div className="nav-section">{index === 0 ? "Tu día a día" : "Herramientas"}</div>}
         <NavLink
           key={to}
           to={to}
@@ -101,5 +101,32 @@ export function MobileDrawer({
         <Footer />
       </div>
     </div>
+  );
+}
+
+/** Accesos principales para operar desde el teléfono con una sola mano. */
+export function MobileBottomNav() {
+  const principales = NAV.filter((item) =>
+    ["/", "/pedidos", "/preguntas", "/stock"].includes(item.to),
+  );
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-4 border-t bg-surface/95 px-1 pb-[max(6px,env(safe-area-inset-bottom))] pt-1 backdrop-blur hairline lg:hidden">
+      {principales.map(({ to, label, icon: Icon }) => (
+        <NavLink
+          key={to}
+          to={to}
+          end={to === "/"}
+          className={({ isActive }) =>
+            cx(
+              "flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-lg text-[10px] font-semibold",
+              isActive ? "text-accent" : "text-ink/45",
+            )
+          }
+        >
+          <Icon />
+          <span>{label}</span>
+        </NavLink>
+      ))}
+    </nav>
   );
 }

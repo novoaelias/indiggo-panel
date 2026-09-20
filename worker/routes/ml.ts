@@ -13,6 +13,7 @@ import {
   redirectUri,
 } from "../lib/ml";
 import { syncAll, syncOneItem, syncOneOrder } from "../lib/sync";
+import { processQuestion, syncQuestion } from "../lib/questions";
 
 export const ml = new Hono<{ Bindings: Env }>();
 
@@ -275,12 +276,36 @@ async function procesarNotif(
       if (oid) await syncOneOrder(env, db, oid);
       break;
     }
+    case "questions":
+      await syncQuestion(env, db as never, id);
+      await processQuestion(env, db as never, id);
+      break;
     default:
       console.log(`[ml] notif topic sin manejar: ${n.topic}`);
   }
 }
 
 ml.post("/notifications", async (c) => {
+  let body: MlNotif = {};
+  try {
+    body = await c.req.json<MlNotif>();
+  } catch {
+    return c.body(null, 200);
+  }
+  const db = supa(c.env);
+  c.executionCtx.waitUntil(
+    procesarNotif(c.env, db, body).catch((e) =>
+      console.error("[ml] notif error", e),
+    ),
+  );
+  return c.body(null, 200);
+});
+
+// La app de ML tiene cargada la misma URL para el redirect de OAuth y para las
+// notificaciones (`notifications_callback_url`). El redirect llega por GET y la
+// notificación por POST, así que acá se acepta el POST y se procesa igual: si
+// algún día se corrige la URL en el devcenter, esto sigue siendo inofensivo.
+ml.post("/callback", async (c) => {
   let body: MlNotif = {};
   try {
     body = await c.req.json<MlNotif>();

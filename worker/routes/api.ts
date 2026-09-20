@@ -4,8 +4,10 @@ import type { Env } from "../env";
 import { catalogo } from "./catalogo";
 import { contenido } from "./contenido";
 import { ia } from "./ia";
+import { inventario } from "./inventario";
 import { ml } from "./ml";
 import { panel } from "./panel";
+import { preguntas } from "./preguntas";
 import { seo } from "./seo";
 
 export const api = new Hono<{ Bindings: Env }>();
@@ -61,6 +63,8 @@ api.route("/catalogo", catalogo);
 api.route("/contenido", contenido);
 api.route("/ml", ml);
 api.route("/ia", ia);
+api.route("/inventario", inventario);
+api.route("/preguntas", preguntas);
 api.route("/seo", seo);
 api.route("/", panel);
 

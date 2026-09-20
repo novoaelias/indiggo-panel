@@ -5,6 +5,8 @@ import {
   IconInicio,
   IconMetricas,
   IconPedidos,
+  IconPreguntas,
+  IconProduccion,
   IconPublicaciones,
   IconStock,
 } from "./icons";
@@ -17,9 +19,11 @@ export interface NavItem {
 
 export const NAV: NavItem[] = [
   { to: "/", label: "Inicio", icon: IconInicio },
-  { to: "/publicaciones", label: "Publicaciones", icon: IconPublicaciones },
   { to: "/pedidos", label: "Pedidos", icon: IconPedidos },
-  { to: "/stock", label: "Stock y producción", icon: IconStock },
+  { to: "/preguntas", label: "Preguntas", icon: IconPreguntas },
+  { to: "/stock", label: "Inventario", icon: IconStock },
+  { to: "/produccion", label: "Producción", icon: IconProduccion },
+  { to: "/publicaciones", label: "Publicaciones", icon: IconPublicaciones },
   { to: "/metricas", label: "Métricas", icon: IconMetricas },
   { to: "/contenido", label: "Contenido", icon: IconContenido },
   { to: "/configuracion", label: "Configuración", icon: IconConfig },

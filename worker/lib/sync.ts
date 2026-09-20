@@ -6,16 +6,10 @@ import type { Env } from "../env";
 import { getToken, mlFetch } from "./ml";
 import { regenerarAlertas } from "./alertas";
 import { derivarCatalogo } from "./derivar";
-import { derivarBOM } from "./bom";
 import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
 import { envioTerminado } from "./envios";
 import { fechaRepartoAR } from "./fecha";
-import type { ChequeoStock } from "./stock";
-import {
-  ajustarStockPorPedido,
-  avisarStockManual,
-  sincronizarStockML,
-} from "./stock";
+import { sincronizarStockML } from "./stock";
 
 type DB = SupabaseClient<Database>;
 
@@ -265,24 +259,90 @@ async function upsertOrder(
       },
       { onConflict: "ml_order_id" },
     )
-    .select("id")
+    .select("id, stock_descontado_at")
     .single();
   if (error || !order) throw new Error(`order ${o.id}: ${error?.message}`);
 
-  await db.from("ml_order_items").delete().eq("ml_order_id", order.id);
-  const items = (o.order_items ?? []).map((li) => ({
-    ml_order_id: order.id,
-    ml_item_id: li.item?.id ?? null,
-    ml_variation_id:
-      li.item?.variation_id != null ? String(li.item.variation_id) : null,
-    titulo: li.item?.title ?? null,
-    cantidad: li.quantity ?? 1,
-    precio_unitario: li.unit_price ?? null,
-  }));
-  if (items.length) await db.from("ml_order_items").insert(items);
+  // Mantener IDs estables: las reservas apuntan a cada ítem y no deben borrarse
+  // cada vez que Mercado Libre vuelve a notificar el mismo pedido.
+  const { data: existentes } = await db
+    .from("ml_order_items")
+    .select("id, ml_item_id, ml_variation_id")
+    .eq("ml_order_id", order.id);
+  const usados = new Set<string>();
+  for (const li of o.order_items ?? []) {
+    const itemId = li.item?.id ?? null;
+    const variationId =
+      li.item?.variation_id != null ? String(li.item.variation_id) : null;
+    const previo = (existentes ?? []).find(
+      (x) => x.ml_item_id === itemId && x.ml_variation_id === variationId,
+    );
+    const productVariantId = itemId
+      ? await resolverVariantePedido(db, itemId, variationId)
+      : null;
+    const values = {
+      ml_order_id: order.id,
+      ml_item_id: itemId,
+      ml_variation_id: variationId,
+      product_variant_id: productVariantId,
+      titulo: li.item?.title ?? null,
+      cantidad: li.quantity ?? 1,
+      precio_unitario: li.unit_price ?? null,
+    };
+    if (previo) {
+      usados.add(previo.id);
+      await db.from("ml_order_items").update(values).eq("id", previo.id);
+    } else {
+      const { data: creado } = await db
+        .from("ml_order_items")
+        .insert(values)
+        .select("id")
+        .single();
+      if (creado) usados.add(creado.id);
+    }
+  }
+  const obsoletos = (existentes ?? []).filter((x) => !usados.has(x.id)).map((x) => x.id);
+  if (obsoletos.length) await db.from("ml_order_items").delete().in("id", obsoletos);
+
+  // Sólo reserva lo que todavía no salió: Mercado Libre deja los pedidos en
+  // "paid" para siempre, así que un pedido ya despachado volvería a reservar
+  // stock en cada sincronización.
+  if (o.status === "paid" && !order.stock_descontado_at)
+    await db.rpc("inventory_reserve_order", { p_order_id: order.id });
 
   const shippingId = o.shipping?.id != null ? String(o.shipping.id) : null;
   return { id: order.id, shippingId };
+}
+
+async function resolverVariantePedido(
+  db: DB,
+  itemId: string,
+  variationId: string | null,
+): Promise<string | null> {
+  const { data: listing } = await db
+    .from("ml_listings")
+    .select("id, product_id, product_variant_id")
+    .eq("ml_item_id", itemId)
+    .maybeSingle();
+  if (!listing) return null;
+  if (variationId) {
+    const { data: variation } = await db
+      .from("ml_listing_variations")
+      .select("product_variant_id")
+      .eq("ml_listing_id", listing.id)
+      .eq("ml_variation_id", variationId)
+      .maybeSingle();
+    if (variation?.product_variant_id) return variation.product_variant_id;
+  }
+  if (listing.product_variant_id) return listing.product_variant_id;
+  if (!listing.product_id) return null;
+  const { data: variants } = await db
+    .from("product_variants")
+    .select("id")
+    .eq("product_id", listing.product_id)
+    .eq("activo", true)
+    .limit(2);
+  return variants?.length === 1 ? variants[0].id : null;
 }
 
 // El tipo de logística (Flex / Mercado Envíos / Full) y el estado real del envío
@@ -357,10 +417,21 @@ export async function descontarPorDespacho(
   if (!claim || claim.length === 0) return { ya: true, aplicados: 0, avisos: [] };
 
   let aplicados = 0;
-  let avisos: string[] = [];
-  let chequeos: ChequeoStock[] = [];
+  const avisos: string[] = [];
   try {
-    ({ aplicados, avisos, chequeos } = await ajustarStockPorPedido(db, orderId, -1));
+    await (db as unknown as { rpc: (name: string, args: Record<string, unknown>) => Promise<{ error?: { message: string } | null }> })
+      .rpc("inventory_fulfill_order", {
+        p_order_id: orderId,
+        p_idempotency_key: `despacho:${orderId}`,
+      })
+      .then((r) => {
+        if (r.error) throw new Error(r.error.message);
+      });
+    const { count } = await db
+      .from("ml_order_items")
+      .select("id", { count: "exact", head: true })
+      .eq("ml_order_id", orderId);
+    aplicados = count ?? 0;
   } catch (e) {
     // no se pudo tocar el stock: soltar el claim para reintentar en el próximo sync
     await db
@@ -371,13 +442,6 @@ export async function descontarPorDespacho(
       .eq("id", orderId);
     throw e;
   }
-  await avisarStockManual(
-    db,
-    orderId,
-    (o as { comprador?: string | null }).comprador ?? null,
-    avisos,
-    chequeos,
-  );
   return { ya: false, aplicados, avisos };
 }
 
@@ -389,30 +453,16 @@ async function restaurarSiCancelado(
 ): Promise<void> {
   if (estado !== "cancelled") return;
 
-  // Claim atómico a la inversa: pasar stock_descontado_at de "no null" a null.
-  // Solo una ejecución se lleva la fila → el stock se devuelve una sola vez.
-  const { data: claim } = await db
+  // Antes del despacho sólo se libera la reserva. Si el pedido ya salió, la
+  // devolución física se registra explícitamente desde Inventario.
+  const { data: row } = await db
     .from("ml_orders")
-    .update({
-      stock_descontado_at: null,
-    } as Database["public"]["Tables"]["ml_orders"]["Update"])
+    .select("stock_descontado_at")
     .eq("id", orderId)
-    .not("stock_descontado_at", "is", null)
-    .select("id");
-  if (!claim || claim.length === 0) return;
-
-  try {
-    await ajustarStockPorPedido(db, orderId, 1);
-  } catch (e) {
-    // no se pudo devolver: re-marcar para reintentar en el próximo sync
-    await db
-      .from("ml_orders")
-      .update({
-        stock_descontado_at: new Date().toISOString(),
-      } as Database["public"]["Tables"]["ml_orders"]["Update"])
-      .eq("id", orderId);
-    throw e;
-  }
+    .maybeSingle();
+  if (row?.stock_descontado_at) return;
+  await (db as unknown as { rpc: (name: string, args: Record<string, unknown>) => Promise<unknown> })
+    .rpc("inventory_release_order", { p_order_id: orderId });
 }
 
 // Agrega el envío Flex a la planilla "INDIGGO" (una sola vez). El bloque del día
@@ -607,6 +657,10 @@ export async function syncAll(env: Env, db: DB): Promise<SyncResult> {
     out.variantes = pubs.variantes;
   }
 
+  // Resolver el catálogo antes de traer pedidos permite vincular y reservar cada
+  // ítem por ID estable, incluso si la publicación apareció recién en este sync.
+  await seguro(errores, "catálogo", () => derivarCatalogo(db));
+
   const pedidos = await seguro(errores, "pedidos", () =>
     syncPedidos(env, db, userId, errores),
   );
@@ -621,13 +675,6 @@ export async function syncAll(env: Env, db: DB): Promise<SyncResult> {
     .from("integrations")
     .update({ meta: meta as Json })
     .eq("provider", "mercadolibre");
-
-  // Mantener el catálogo interno + la lista de materiales al día con ML (nuevos
-  // productos/variantes, publicaciones agrupadas, tiempos de placa). Idempotente.
-  await seguro(errores, "catálogo", async () => {
-    await derivarCatalogo(db);
-    await derivarBOM(db);
-  });
 
   // Stock derivado (vendible de holders, buffer de ML, mínimos por ventas) +
   // los descuentos por despacho que hayan quedado marcados en syncEnvio, y el

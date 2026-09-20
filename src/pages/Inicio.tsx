@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { AvisoPush } from "@/components/AvisoPush";
 import { Card, Dot, EmptyHint, PageHeader } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
 import { formatARS, hoyLargo, saludo } from "@/lib/format";
@@ -10,6 +11,9 @@ interface InicioData {
   ventas_semana: number;
   publicaciones_activas: number;
   publicaciones_pausadas: number;
+  preguntas_pendientes: number;
+  faltantes_pedidos: number;
+  piezas_bajas: number;
   ultimos_pedidos: Array<{
     id: string;
     fecha: string;
@@ -51,12 +55,14 @@ export function Inicio() {
         })()}
       />
 
+      <AvisoPush />
+
       <section className="quick-start" aria-label="Accesos rápidos">
         <div><span className="eyebrow">TU TIENDA, EN ORDEN</span><h2>¿Qué necesitás hacer hoy?</h2><p>Elegí una tarea para empezar.</p></div>
         <div className="quick-links">{[
-          ["/pedidos", "01", "Preparar pedidos", "Revisá los próximos despachos"],
-          ["/publicaciones", "02", "Gestionar publicaciones", "Fotos, colores y precios"],
-          ["/stock", "03", "Organizar producción", "Qué tenés y qué falta producir"],
+          ["/preguntas", data?.preguntas_pendientes ? String(data.preguntas_pendientes) : "✓", "Responder preguntas", data?.preguntas_pendientes ? "Hay consultas que necesitan atención" : "No hay preguntas pendientes"],
+          ["/pedidos", data?.faltantes_pedidos ? String(data.faltantes_pedidos) : "✓", "Preparar pedidos", data?.faltantes_pedidos ? "Faltan productos por completar" : "Los pedidos tienen stock reservado"],
+          ["/produccion", data?.piezas_bajas ? String(data.piezas_bajas) : "✓", "Organizar producción", data?.piezas_bajas ? "Hay piezas por reponer" : "Inventario de piezas en orden"],
         ].map(([to, n, title, desc]) => <Link to={to} key={to}><span className="quick-number">{n}</span><strong>{title} <span aria-hidden>↗</span></strong><small>{desc}</small></Link>)}</div>
       </section>
       {loading && <EmptyHint>Cargando resumen…</EmptyHint>}

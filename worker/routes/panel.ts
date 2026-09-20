@@ -1,17 +1,10 @@
 import { Hono } from "hono";
-import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
 import { descontarPorDespacho, syncEnvio, syncOneItem } from "../lib/sync";
 import { sheetsConfigurado, sheetsSuspendido } from "../lib/sheets";
-import { esVariantePieza, planificar, ventasRecientes } from "../lib/bom";
-import {
-  publicadoEnML,
-  recalcularDerivado,
-  resolverAlertaManual,
-  sincronizarStockML,
-} from "../lib/stock";
+import { resolverAlertaManual, sincronizarStockML } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
 import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
 import { etiquetaLogistica, pedidoActivo } from "../lib/envios";
@@ -28,7 +21,7 @@ panel.get("/publicaciones", async (c) => {
   let query = db
     .from("ml_listings")
     .select(
-      "id, ml_item_id, titulo, estado, precio, moneda, cantidad_ml, tiene_variantes, permalink, thumbnail, categoria_sugerida, categoria_analisis, reemplazada_por, family_name:raw->>family_name, products(descontinuado)",
+      "id, product_id, ml_item_id, titulo, estado, precio, moneda, cantidad_ml, tiene_variantes, permalink, thumbnail, categoria_sugerida, categoria_analisis, reemplazada_por, family_name:raw->>family_name, products(id,nombre,nombre_interno,descontinuado)",
     )
     .order("titulo");
   if (estado && estado !== "todas" && !verDescontinuadas)
@@ -76,6 +69,12 @@ panel.get("/publicaciones", async (c) => {
       reemplazada_por: l.reemplazada_por,
       familia: Boolean(l.family_name),
       descontinuada: esDescontinuada(l),
+      product_id: l.product_id,
+      producto_nombre:
+        (l.products as { nombre_interno?: string | null; nombre?: string } | null)
+          ?.nombre_interno ||
+        (l.products as { nombre?: string } | null)?.nombre ||
+        "Sin agrupar",
     };
   });
 
@@ -179,403 +178,83 @@ interface MetricasResumen {
   pedidos_prev: number;
   por_dia: Array<{ dia: string; monto: number; pedidos: number }>;
   top: Array<{ nombre: string; unidades: number; ingreso: number }>;
+  preguntas: {
+    respondidas: number;
+    automaticas: number;
+    porcentaje_automaticas: number;
+    pendientes: number;
+    horas_respuesta: number | null;
+  };
+  inventario: { unidades_faltantes: number; variantes_sin_libres: number };
 }
 
 panel.get("/metricas", async (c) => {
   const dias = Math.min(Math.max(Number(c.req.query("dias") ?? 7), 1), 90);
   const db = supa(c.env);
-  const { data, error } = await db.rpc("panel_metricas", { p_dias: dias });
+  const [{ data, error }, preguntasResp, pendientesResp, reservasResp, variantesResp] =
+    await Promise.all([
+      db.rpc("panel_metricas", { p_dias: dias }),
+      (db as unknown as { from: (name: string) => any })
+        .from("ml_questions")
+        .select("automatico, preguntada_at, respondida_at")
+        .not("respondida_at", "is", null)
+        .gte("respondida_at", new Date(Date.now() - dias * 86_400_000).toISOString()),
+      (db as unknown as { from: (name: string) => any })
+        .from("ml_questions")
+        .select("id", { count: "exact", head: true })
+        .in("estado_panel", ["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"]),
+      (db as unknown as { from: (name: string) => any })
+        .from("inventory_reservations")
+        .select("missing_qty")
+        .eq("estado", "activa")
+        .gt("missing_qty", 0),
+      db.from("product_variants").select("stock_real").eq("activo", true).eq("es_eleccion", false),
+    ]);
   if (error) return c.json({ error: error.message }, 500);
-  return c.json(data as unknown as MetricasResumen);
+  const questions = preguntasResp.data ?? [];
+  const automaticas = questions.filter((row: any) => row.automatico).length;
+  // Tiempo típico de respuesta: mediana en horas, que no se deforma con la
+  // pregunta vieja que se contestó meses después.
+  const demoras = questions
+    .map(
+      (row: any) =>
+        (new Date(row.respondida_at).getTime() -
+          new Date(row.preguntada_at).getTime()) /
+        3_600_000,
+    )
+    .filter((horas: number) => Number.isFinite(horas) && horas >= 0)
+    .sort((a: number, b: number) => a - b);
+  const horasRespuesta = demoras.length
+    ? Math.round(demoras[Math.floor(demoras.length / 2)] * 10) / 10
+    : null;
+  const resumen = data as unknown as Omit<MetricasResumen, "preguntas" | "inventario">;
+  return c.json({
+    ...resumen,
+    preguntas: {
+      respondidas: questions.length,
+      automaticas,
+      porcentaje_automaticas: questions.length
+        ? Math.round((automaticas / questions.length) * 100)
+        : 0,
+      pendientes: pendientesResp.count ?? 0,
+      horas_respuesta: horasRespuesta,
+    },
+    inventario: {
+      unidades_faltantes: (reservasResp.data ?? []).reduce(
+        (sum: number, row: any) => sum + Number(row.missing_qty || 0),
+        0,
+      ),
+      variantes_sin_libres: (variantesResp.data ?? []).filter(
+        (row) => Number(row.stock_real || 0) <= 0,
+      ).length,
+    },
+  } satisfies MetricasResumen);
 });
 
 // --- Stock y producción ---
-
-
-const GRUPO_TIPO: Record<string, string> = {
-  photocard: "Photocards",
-  cuerpo: "Cuerpos 3D",
-  llavero: "Llaveros 3D",
-  mostacilla: "Mostacillas",
-  producto: "Otros",
-};
-
-panel.get("/stock", async (c) => {
-  const db = supa(c.env);
-  await recalcularDerivado(db);
-
-  const [
-    { data: variants, error },
-    { data: prods },
-    { data: vc },
-    { data: comps },
-    plan,
-    ventas,
-    ml,
-  ] = await Promise.all([
-    db
-      .from("product_variants")
-      .select(
-        "id, product_id, etiqueta, stock_real, stock_ml, stock_minimo, es_eleccion, group_member_id, group_members(nombre)",
-      )
-      .eq("activo", true),
-    db
-      .from("products")
-      .select(
-        "id, nombre, variantes_por_integrante, descontinuado, categories(nombre, slug), groups(nombre)",
-      ),
-    db.from("variant_components").select("variant_id, component_id, cantidad"),
-    db
-      .from("components")
-      .select("id, nombre, origen, stock_real, stock_minimo, group_member_id"),
-    planificar(db),
-    ventasRecientes(db),
-    publicadoEnML(db),
-  ]);
-  if (error) return c.json({ error: error.message }, 500);
-
-  type Prod = NonNullable<typeof prods>[number];
-  const prodById = new Map((prods ?? []).map((p) => [p.id, p as Prod]));
-  const compById = new Map((comps ?? []).map((x) => [x.id, x]));
-  // los productos descontinuados (Elias ya no los vende, aunque ML no deje
-  // borrar la publicación) no cuentan acá: ni como "para producir/vender" ni
-  // como desincronizados con ML.
-  const variantsVigentes = (variants ?? []).filter(
-    (v) => !prodById.get(v.product_id)?.descontinuado,
-  );
-  const nombreGrp = (p?: Prod) =>
-    (p?.groups as { nombre?: string } | null)?.nombre ?? null;
-  const slugCat = (p?: Prod) =>
-    (p?.categories as { slug?: string } | null)?.slug ?? null;
-  const nombreCat = (p?: Prod) =>
-    (p?.categories as { nombre?: string } | null)?.nombre ?? null;
-
-  const bomPorVar = new Map<string, string[]>();
-  const bomLinesPorVar = new Map<string, Array<{ cid: string; qty: number }>>();
-  for (const r of vc ?? []) {
-    if (!bomPorVar.has(r.variant_id)) bomPorVar.set(r.variant_id, []);
-    bomPorVar.get(r.variant_id)!.push(r.component_id);
-    if (!bomLinesPorVar.has(r.variant_id)) bomLinesPorVar.set(r.variant_id, []);
-    bomLinesPorVar.get(r.variant_id)!.push({ cid: r.component_id, qty: r.cantidad || 1 });
-  }
-  // "producto = pieza" (llavero suelto): 1 sola pieza ×1
-  const esVarPieza = (vid: string) =>
-    esVariantePieza((bomLinesPorVar.get(vid) ?? []).map((l) => ({ cantidad: l.qty })));
-  // cuántos packs se pueden armar YA con las piezas en stock
-  const armablesDeVariante = (vid: string): number => {
-    const lines = bomLinesPorVar.get(vid);
-    if (!lines?.length) return 0;
-    return Math.min(
-      ...lines.map((l) =>
-        Math.floor((compById.get(l.cid)?.stock_real ?? 0) / l.qty),
-      ),
-    );
-  };
-  const esHolderVar = (vid: string, pid: string) =>
-    !!prodById.get(pid)?.variantes_por_integrante &&
-    (bomPorVar.get(vid)?.length ?? 0) > 0;
-
-  // ---- piezas (lo único editable) ----
-  interface Pieza {
-    kind: "componente" | "variante";
-    id: string;
-    tipo: string;
-    grupo: string;
-    nombre: string;
-    contexto: string | null;
-    stock_real: number;
-    stock_minimo: number;
-    producir: number;
-    estado_tono: "ok" | "warn" | "danger";
-  }
-  const piezas: Pieza[] = [];
-
-  const partir = (raw: string) => {
-    const p = raw.split(" · ").map((s) => s.trim());
-    if (p[0] === "Photocard")
-      return {
-        tipo: "photocard",
-        nombre: p[1] ?? "Photocard",
-        contexto: p[2] ?? null,
-      };
-    if (p[0] === "Cuerpo")
-      return { tipo: "cuerpo", nombre: "Cuerpo", contexto: p.slice(1).join(" · ") || null };
-    if (p[0] === "Llavero")
-      return { tipo: "llavero", nombre: "Llavero", contexto: p.slice(1).join(" · ") || null };
-    // piezas 3D de packs (logos arirang, sets de nombres, letras BTS)
-    if (/^(Logo |Set nombres|Letras )/.test(raw))
-      return { tipo: "mostacilla", nombre: raw, contexto: null };
-    return { tipo: "producto", nombre: raw, contexto: null };
-  };
-  const mkPieza = (
-    kind: Pieza["kind"],
-    id: string,
-    tipo: string,
-    nombre: string,
-    contexto: string | null,
-    real: number,
-    minimo: number,
-    producir: number,
-  ): Pieza => ({
-    kind,
-    id,
-    tipo,
-    grupo: GRUPO_TIPO[tipo] ?? "Otros",
-    nombre,
-    contexto,
-    stock_real: real,
-    stock_minimo: minimo,
-    producir,
-    estado_tono: real <= 0 ? "danger" : producir > 0 ? "warn" : "ok",
-  });
-
-  // componentes = piezas de holders (cuerpo / llavero / photocard por integrante)
-  for (const comp of comps ?? []) {
-    const { tipo, nombre, contexto } = partir(comp.nombre);
-    piezas.push(
-      mkPieza(
-        "componente",
-        comp.id,
-        tipo,
-        nombre,
-        contexto,
-        comp.stock_real,
-        comp.stock_minimo,
-        plan.producir_componente[comp.id] ?? 0,
-      ),
-    );
-  }
-
-  // variantes de productos simples (mostacillas, clickers, stickers, llaveros…)
-  for (const v of variantsVigentes) {
-    if (esHolderVar(v.id, v.product_id)) continue;
-    // "Random / a elección": no es una pieza con stock propio.
-    if (v.es_eleccion) continue;
-    // "producto = pieza": Elias edita la pieza (aparece en "Llaveros 3D").
-    if (esVarPieza(v.id)) continue;
-    const p = prodById.get(v.product_id);
-    const member =
-      (v.group_members as { nombre?: string } | null)?.nombre ?? null;
-    const slug = slugCat(p);
-    const tipo = slug === "mostacillas" ? "mostacilla" : "producto";
-    const variante = member ?? (v.etiqueta !== "Único" ? v.etiqueta : null);
-    piezas.push(
-      mkPieza(
-        "variante",
-        v.id,
-        tipo,
-        p?.nombre ?? "—",
-        variante ?? nombreCat(p) ?? nombreGrp(p),
-        v.stock_real,
-        v.stock_minimo,
-        plan.producir_variante[v.id] ?? 0,
-      ),
-    );
-  }
-
-  piezas.sort(
-    (a, b) =>
-      (b.producir > 0 || a.stock_real <= 0 ? 0 : 1) -
-        (a.producir > 0 || b.stock_real <= 0 ? 0 : 1) ||
-      b.producir - a.producir ||
-      a.nombre.localeCompare(b.nombre),
-  );
-
-  // ---- productos (sólo lectura: "qué puedo despachar hoy") ----
-  // Un renglón por producto activo, con las unidades que se pueden vender ya:
-  //  · holder  → derivado de las piezas (cuerpo/llavero/photocard)
-  //  · simple  → suma del stock real de sus variantes
-  interface ProdResumen {
-    product_id: string;
-    nombre: string;
-    grupo: string | null;
-    vendibles: number;
-    sin_stock_de: string[];
-    estado_tono: "ok" | "warn" | "danger";
-  }
-  const gmNombre = new Map(
-    (comps ?? [])
-      .filter((c) => c.group_member_id)
-      .map((c) => [c.id, partir(c.nombre).nombre]),
-  );
-
-  const holderAgg = new Map<
-    string,
-    { nombre: string; grupo: string | null; pc: Set<string>; d3: number[] }
-  >();
-  const simpleAgg = new Map<
-    string,
-    { nombre: string; grupo: string | null; total: number; sin: string[] }
-  >();
-
-  for (const v of variantsVigentes) {
-    if (v.es_eleccion) continue;
-    const p = prodById.get(v.product_id);
-    if (esHolderVar(v.id, v.product_id)) {
-      let h = holderAgg.get(v.product_id);
-      if (!h) {
-        h = { nombre: p?.nombre ?? "—", grupo: nombreGrp(p), pc: new Set(), d3: [] };
-        holderAgg.set(v.product_id, h);
-      }
-      for (const cid of bomPorVar.get(v.id) ?? []) {
-        const comp = compById.get(cid);
-        if (!comp) continue;
-        if (comp.origen === "imprenta") h.pc.add(cid);
-        else if (!h.d3.includes(comp.stock_real)) h.d3.push(comp.stock_real);
-      }
-    } else {
-      let s = simpleAgg.get(v.product_id);
-      if (!s) {
-        s = { nombre: p?.nombre ?? "—", grupo: nombreGrp(p) ?? nombreCat(p), total: 0, sin: [] };
-        simpleAgg.set(v.product_id, s);
-      }
-      // packs con receta: lo armado a mano + lo que se puede armar ya con piezas.
-      // "producto = pieza" (llavero suelto): su stock_real ya ES el de la pieza.
-      const disponible = esVarPieza(v.id)
-        ? Math.max(0, v.stock_real)
-        : Math.max(0, v.stock_real) + armablesDeVariante(v.id);
-      s.total += disponible;
-      if (disponible <= 0) {
-        const member = (v.group_members as { nombre?: string } | null)?.nombre ?? null;
-        const etq = member ?? (v.etiqueta !== "Único" ? v.etiqueta : null);
-        if (etq) s.sin.push(etq);
-      }
-    }
-  }
-
-  const productos: ProdResumen[] = [];
-  for (const [pid, h] of holderAgg) {
-    const pcStock = [...h.pc].map((cid) => compById.get(cid)?.stock_real ?? 0);
-    const totalPc = pcStock.reduce((s, n) => s + n, 0);
-    const min3d = h.d3.length ? Math.min(...h.d3) : Infinity;
-    const vendibles = Math.max(0, Math.min(min3d === Infinity ? totalPc : min3d, totalPc));
-    const ventas14 = ventas.porProducto.get(pid) ?? 0;
-    const sin = [...h.pc]
-      .filter((cid) => (compById.get(cid)?.stock_real ?? 0) <= 0)
-      .map((cid) => gmNombre.get(cid) ?? "")
-      .filter(Boolean);
-    productos.push({
-      product_id: pid,
-      nombre: h.nombre,
-      grupo: h.grupo,
-      vendibles,
-      sin_stock_de: sin,
-      estado_tono:
-        vendibles <= 0 ? "danger" : vendibles < (ventas14 / 14) * 7 ? "warn" : "ok",
-    });
-  }
-  for (const [pid, s] of simpleAgg) {
-    const ventas14 = ventas.porProducto.get(pid) ?? 0;
-    productos.push({
-      product_id: pid,
-      nombre: s.nombre,
-      grupo: s.grupo,
-      vendibles: s.total,
-      sin_stock_de: s.sin,
-      estado_tono:
-        s.total <= 0 ? "danger" : s.total < (ventas14 / 14) * 7 ? "warn" : "ok",
-    });
-  }
-  const tonoRank = { danger: 0, warn: 1, ok: 2 } as const;
-  productos.sort(
-    (a, b) =>
-      tonoRank[a.estado_tono] - tonoRank[b.estado_tono] ||
-      a.nombre.localeCompare(b.nombre),
-  );
-
-  // ---- resumen ----
-  let desync = 0;
-  for (const v of variantsVigentes) {
-    const live = ml.porVar.get(v.id) ?? ml.porProd.get(v.product_id) ?? [];
-    if (live.some((n) => n !== v.stock_ml)) desync++;
-  }
-
-  return c.json({
-    piezas,
-    productos,
-    resumen: {
-      piezas_a_producir: piezas.filter((p) => p.producir > 0).length,
-      ml_desincronizado: desync,
-      sin_catalogo: (variants?.length ?? 0) === 0,
-    },
-  });
-});
-
-// Editar el stock físico de una variante simple. El buffer de ML (calcBuffer) y
-// el mínimo (calcMinimo, por ventas) son automáticos — no se aceptan acá.
-panel.patch("/stock/:id", async (c) => {
-  const id = c.req.param("id");
-  const body = await c.req.json<{ stock_real?: number }>();
-  const patch: Record<string, number> = {};
-  const v = body.stock_real;
-  if (typeof v === "number" && Number.isFinite(v) && v >= 0)
-    patch.stock_real = Math.round(v);
-  if (!Object.keys(patch).length)
-    return c.json({ error: "nada para actualizar" }, 400);
-
-  const db = supa(c.env);
-  const { error } = await db
-    .from("product_variants")
-    .update(patch as Database["public"]["Tables"]["product_variants"]["Update"])
-    .eq("id", id);
-  if (error) return c.json({ error: error.message }, 500);
-  return c.json({ ok: true });
-});
-
-// Sincroniza Mercado Libre: recalcula los buffers automáticos y publica los que
-// quedaron desincronizados. Además de este botón manual, corre sola en cada
-// sync (cron horario + webhook de pedidos) — ver sincronizarStockML en lib/stock.
-panel.post("/stock/sincronizar-ml", async (c) => {
-  const db = supa(c.env);
-  const r = await sincronizarStockML(c.env, db, {
-    onItemTocado: (it) =>
-      syncOneItem(c.env, db, it).catch(() => {}),
-  });
-  return c.json({
-    pendientes: r.pendientes,
-    publicados: r.publicados,
-    errores: r.errores,
-  });
-});
-
-// --- Planificador de producción (explota el BOM) ---
-panel.get("/produccion", async (c) => {
-  const db = supa(c.env);
-  await recalcularDerivado(db);
-  return c.json(await planificar(db));
-});
-
-// --- Insumos (componentes: cuerpos 3D, photocards) ---
-panel.get("/componentes", async (c) => {
-  const db = supa(c.env);
-  const { data, error } = await db
-    .from("components")
-    .select("id, nombre, origen, stock_real, stock_minimo")
-    .order("origen")
-    .order("nombre");
-  if (error) return c.json({ error: error.message }, 500);
-  return c.json({ componentes: data });
-});
-
-panel.patch("/componentes/:id", async (c) => {
-  const id = c.req.param("id");
-  const body = await c.req.json<{ stock_real?: number }>();
-  const patch: Record<string, number> = {};
-  const v = body.stock_real;
-  if (typeof v === "number" && Number.isFinite(v) && v >= 0)
-    patch.stock_real = Math.round(v);
-  if (!Object.keys(patch).length)
-    return c.json({ error: "nada para actualizar" }, 400);
-  const db = supa(c.env);
-  const { error } = await db
-    .from("components")
-    .update(patch as Database["public"]["Tables"]["components"]["Update"])
-    .eq("id", id);
-  if (error) return c.json({ error: error.message }, 500);
-  // lo derivado (vendible + buffer) se recalcula en GET /stock y en
-  // POST /stock/sincronizar-ml — no bloqueamos el guardado acá.
-  return c.json({ ok: true });
-});
+// El inventario físico (piezas, armados, ajustes y el empuje del colchón a ML)
+// vive en worker/routes/inventario.ts: todo pasa por las operaciones
+// transaccionales, y abrir una pantalla no modifica cantidades.
 
 // --- Inicio (resumen del día + alertas de la tabla) ---
 const TONO_POR_SEV: Record<string, "ok" | "warn" | "danger" | "info"> = {
@@ -626,18 +305,84 @@ panel.get("/inicio", async (c) => {
     texto: a.detalle ?? "",
   }));
 
+  const dbLoose = db as unknown as { from: (name: string) => any };
+  const [questionsPending, reservationsMissing, lowComponents] = await Promise.all([
+    dbLoose
+      .from("ml_questions")
+      .select("id", { count: "exact", head: true })
+      .in("estado_panel", ["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"]),
+    dbLoose
+      .from("inventory_reservations")
+      .select("missing_qty")
+      .eq("estado", "activa"),
+    dbLoose
+      .from("components")
+      .select("id,stock_real,stock_minimo")
+      .eq("activo", true),
+  ]);
+
   return c.json({
     ventas_hoy: sum(ventasHoy.data),
     pedidos_hoy: ventasHoy.data?.length ?? 0,
     ventas_semana: sum(ventasSemana.data),
     publicaciones_activas: activas,
     publicaciones_pausadas: (listings.data?.length ?? 0) - activas,
+    preguntas_pendientes: questionsPending.count ?? 0,
+    faltantes_pedidos: (reservationsMissing.data ?? []).reduce(
+      (sum: number, row: { missing_qty: number }) => sum + row.missing_qty,
+      0,
+    ),
+    piezas_bajas: (lowComponents.data ?? []).filter(
+      (row: { stock_real: number; stock_minimo: number }) =>
+        row.stock_minimo > 0 && row.stock_real < row.stock_minimo,
+    ).length,
     ultimos_pedidos: ultimosPedidos.data ?? [],
     alertas,
   });
 });
 
 // --- Pedidos activos (pagados y sin despachar), separados por logística ---
+/** Variantes reales (no "a elección") que puede llevar cada ítem de pedido, a
+ *  partir de la publicación que compró. Sirve para registrar la elección del
+ *  comprador desde Pedidos sin adivinar por el título. */
+async function variantesElegibles(
+  db: ReturnType<typeof supa>,
+  items: Array<{ id: string; ml_item_id?: string | null }>,
+): Promise<Map<string, Array<{ id: string; etiqueta: string }>>> {
+  const out = new Map<string, Array<{ id: string; etiqueta: string }>>();
+  const itemIds = [...new Set(items.map((i) => i.ml_item_id).filter(Boolean))] as string[];
+  if (!itemIds.length) return out;
+  const { data: listings } = await db
+    .from("ml_listings")
+    .select("ml_item_id, product_id")
+    .in("ml_item_id", itemIds);
+  const productoPorItem = new Map(
+    (listings ?? [])
+      .filter((l) => l.product_id)
+      .map((l) => [l.ml_item_id, l.product_id as string]),
+  );
+  const productIds = [...new Set(productoPorItem.values())];
+  if (!productIds.length) return out;
+  const { data: variantes } = await db
+    .from("product_variants")
+    .select("id, product_id, etiqueta, es_eleccion")
+    .in("product_id", productIds)
+    .eq("activo", true)
+    .eq("es_eleccion", false);
+  const porProducto = new Map<string, Array<{ id: string; etiqueta: string }>>();
+  for (const v of variantes ?? []) {
+    const arr = porProducto.get(v.product_id) ?? [];
+    arr.push({ id: v.id, etiqueta: v.etiqueta });
+    porProducto.set(v.product_id, arr);
+  }
+  for (const item of items) {
+    const pid = item.ml_item_id ? productoPorItem.get(item.ml_item_id) : null;
+    const opciones = pid ? porProducto.get(pid) : null;
+    if (opciones?.length) out.set(item.id, opciones);
+  }
+  return out;
+}
+
 panel.get("/pedidos-activos", async (c) => {
   const db = supa(c.env);
 
@@ -657,15 +402,71 @@ panel.get("/pedidos-activos", async (c) => {
 
   const { data: items } = await db
     .from("ml_order_items")
-    .select("ml_order_id, titulo, cantidad")
+    .select("id, ml_order_id, ml_item_id, titulo, cantidad, product_variant_id")
     .in(
       "ml_order_id",
       activos.map((o) => o.id),
     );
-  const itemsPorPedido = new Map<string, Array<{ titulo: string; cantidad: number }>>();
+  const itemIds = (items ?? []).map((item) => item.id);
+  const variantIds = [...new Set((items ?? []).map((item) => item.product_variant_id).filter(Boolean))] as string[];
+  const dbLoosePedidos = db as unknown as { from: (name: string) => any };
+  const [{ data: reservationRows }, { data: choiceRows }] = await Promise.all([
+    itemIds.length
+      ? dbLoosePedidos
+          .from("inventory_reservations")
+          .select("order_item_id,reserved_qty,missing_qty,estado")
+          .in("order_item_id", itemIds)
+      : Promise.resolve({ data: [] }),
+    variantIds.length
+      ? dbLoosePedidos
+          .from("product_variants")
+          .select("id,es_eleccion")
+          .in("id", variantIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+  const choiceVariants = new Set(
+    (choiceRows ?? []).filter((row: any) => row.es_eleccion).map((row: any) => row.id),
+  );
+
+  // Para los ítems que todavía no tienen una variante real (compras "a elección"
+  // o publicaciones sin mapear), se ofrecen las variantes del producto para
+  // registrar la elección desde el pedido.
+  const opcionesPorItem = await variantesElegibles(
+    db,
+    (items ?? []).filter(
+      (item) =>
+        !item.product_variant_id || choiceVariants.has(item.product_variant_id),
+    ),
+  );
+  const reservationByItem = new Map(
+    (reservationRows ?? []).map((row: any) => [row.order_item_id, row]),
+  );
+  const itemsPorPedido = new Map<
+    string,
+    Array<{
+      id: string;
+      titulo: string;
+      cantidad: number;
+      reservado: number;
+      faltante: number;
+      mapeado: boolean;
+      opciones: Array<{ id: string; etiqueta: string }>;
+    }>
+  >();
   for (const it of items ?? []) {
     const arr = itemsPorPedido.get(it.ml_order_id) ?? [];
-    arr.push({ titulo: it.titulo ?? "—", cantidad: it.cantidad ?? 1 });
+    const reservation = reservationByItem.get(it.id) as
+      | { reserved_qty: number; missing_qty: number }
+      | undefined;
+    arr.push({
+      id: it.id,
+      titulo: it.titulo ?? "—",
+      cantidad: it.cantidad ?? 1,
+      reservado: reservation?.reserved_qty ?? 0,
+      faltante: reservation?.missing_qty ?? (it.product_variant_id ? it.cantidad : 0),
+      mapeado: Boolean(it.product_variant_id) && !choiceVariants.has(it.product_variant_id),
+      opciones: opcionesPorItem.get(it.id) ?? [],
+    });
     itemsPorPedido.set(it.ml_order_id, arr);
   }
 
@@ -685,7 +486,16 @@ panel.get("/pedidos-activos", async (c) => {
     comprador: string | null;
     fecha: string;
     total: number;
-    items: Array<{ titulo: string; cantidad: number }>;
+    items: Array<{
+      id: string;
+      titulo: string;
+      cantidad: number;
+      reservado: number;
+      faltante: number;
+      mapeado: boolean;
+      opciones: Array<{ id: string; etiqueta: string }>;
+    }>;
+    faltantes: number;
     estado_envio: string | null;
     envio_substatus: string | null;
     etiqueta_logistica: string;
@@ -700,6 +510,7 @@ panel.get("/pedidos-activos", async (c) => {
     if (cur) {
       cur.total += o.total ?? 0;
       cur.items.push(...its);
+      cur.faltantes += its.reduce((sum, item) => sum + item.faltante, 0);
       if (o.fecha < cur.fecha) cur.fecha = o.fecha;
     } else {
       paquetes.set(key, {
@@ -708,6 +519,7 @@ panel.get("/pedidos-activos", async (c) => {
         fecha: o.fecha,
         total: o.total ?? 0,
         items: its,
+        faltantes: its.reduce((sum, item) => sum + item.faltante, 0),
         estado_envio: o.estado_envio,
         envio_substatus: o.envio_substatus,
         etiqueta_logistica: eti,
@@ -729,6 +541,42 @@ panel.get("/pedidos-activos", async (c) => {
     conteos[p.etiqueta_logistica] = (conteos[p.etiqueta_logistica] ?? 0) + 1;
 
   return c.json({ paquetes: lista, conteos, total: lista.length });
+});
+
+// Registrar la variante elegida por el comprador (compras "a elección" o ítems
+// que quedaron sin mapear). Reserva de nuevo el pedido para que el faltante y el
+// stock libre queden coherentes en el acto.
+panel.post("/pedidos/items/:id/variante", async (c) => {
+  const itemId = c.req.param("id");
+  const body = await c.req.json<{ product_variant_id?: string }>();
+  if (!body.product_variant_id) return c.json({ error: "falta la variante" }, 400);
+
+  const db = supa(c.env);
+  const { data: item } = await db
+    .from("ml_order_items")
+    .select("id, ml_order_id, ml_item_id")
+    .eq("id", itemId)
+    .maybeSingle();
+  if (!item) return c.json({ error: "ítem inexistente" }, 404);
+
+  // La variante tiene que ser del producto de esa publicación: así no se
+  // descuenta stock de otro producto por un error de tipeo.
+  const opciones = await variantesElegibles(db, [item]);
+  const validas = opciones.get(item.id) ?? [];
+  if (!validas.some((v) => v.id === body.product_variant_id))
+    return c.json({ error: "esa variante no corresponde a la publicación" }, 400);
+
+  const { error } = await db
+    .from("ml_order_items")
+    .update({ product_variant_id: body.product_variant_id })
+    .eq("id", item.id);
+  if (error) return c.json({ error: error.message }, 500);
+
+  await (db as unknown as {
+    rpc: (name: string, args: Record<string, unknown>) => Promise<{ error?: { message: string } | null }>;
+  }).rpc("inventory_reserve_order", { p_order_id: item.ml_order_id });
+
+  return c.json({ ok: true });
 });
 
 // --- Planilla de reparto (Google Sheets): pedidos Flex → filas por día ---

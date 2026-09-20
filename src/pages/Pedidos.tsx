@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Badge, Card, EmptyHint, PageHeader, cx } from "@/components/ui";
-import { useApi } from "@/lib/api";
+import { api, useApi } from "@/lib/api";
 import { formatARS } from "@/lib/format";
 
 interface Paquete {
@@ -8,7 +8,16 @@ interface Paquete {
   comprador: string | null;
   fecha: string;
   total: number;
-  items: Array<{ titulo: string; cantidad: number }>;
+  items: Array<{
+    id: string;
+    titulo: string;
+    cantidad: number;
+    reservado: number;
+    faltante: number;
+    mapeado: boolean;
+    opciones: Array<{ id: string; etiqueta: string }>;
+  }>;
+  faltantes: number;
   estado_envio: string | null;
   envio_substatus: string | null;
   etiqueta_logistica: string;
@@ -39,8 +48,56 @@ function haceCuanto(iso: string): string {
   return `hace ${d} ${d === 1 ? "día" : "días"}`;
 }
 
+/** Registrar la variante que eligió el comprador, sin salir del pedido. */
+function ElegirVariante({
+  item,
+  onListo,
+}: {
+  item: { id: string; opciones: Array<{ id: string; etiqueta: string }> };
+  onListo: () => void;
+}) {
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState<string>();
+  if (!item.opciones.length)
+    return <span className="ml-1 text-warn">(elegir variante)</span>;
+  return (
+    <span className="ml-1 inline-flex items-center gap-1 align-middle">
+      <select
+        className="rounded-md border hairline bg-surface px-1.5 py-0.5 text-[11.5px]"
+        defaultValue=""
+        disabled={guardando}
+        onChange={async (e) => {
+          const variante = e.target.value;
+          if (!variante) return;
+          setGuardando(true);
+          setError(undefined);
+          try {
+            await api(`/pedidos/items/${item.id}/variante`, {
+              method: "POST",
+              body: JSON.stringify({ product_variant_id: variante }),
+            });
+            onListo();
+          } catch (err) {
+            setError((err as Error).message);
+          } finally {
+            setGuardando(false);
+          }
+        }}
+      >
+        <option value="">Elegir variante…</option>
+        {item.opciones.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.etiqueta}
+          </option>
+        ))}
+      </select>
+      {error && <span className="text-danger">{error}</span>}
+    </span>
+  );
+}
+
 export function Pedidos() {
-  const { data, error, loading } = useApi<PedidosResp>("/pedidos-activos");
+  const { data, error, loading, reload } = useApi<PedidosResp>("/pedidos-activos");
 
   const grupos = useMemo(() => {
     if (!data) return [];
@@ -98,15 +155,22 @@ export function Pedidos() {
                       </span>
                     </div>
                     <div className="mt-0.5 text-[12px] text-ink/55 [overflow-wrap:anywhere]">
-                      {p.items
-                        .map((it) =>
-                          it.cantidad > 1
-                            ? `${it.cantidad}× ${it.titulo}`
-                            : it.titulo,
-                        )
-                        .join(" · ") || "—"}
+                      {p.items.map((it) => (
+                        <span key={it.id} className="mr-2 inline-block">
+                          {it.cantidad > 1 ? `${it.cantidad}× ` : ""}{it.titulo}
+                          {!it.mapeado && (
+                            <ElegirVariante item={it} onListo={reload} />
+                          )}
+                          {it.faltante > 0 && <span className="ml-1 text-danger">(falta {it.faltante})</span>}
+                        </span>
+                      ))}
                     </div>
                   </div>
+                  {p.faltantes > 0 ? (
+                    <Badge tono="danger">Completar {p.faltantes}</Badge>
+                  ) : (
+                    <Badge tono="ok">Stock reservado</Badge>
+                  )}
                   {p.a_imprimir ? (
                     <Badge tono="warn">Imprimir etiqueta</Badge>
                   ) : (

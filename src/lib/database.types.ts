@@ -53,6 +53,44 @@ export type Database = {
         }
         Relationships: []
       }
+      business_facts: {
+        Row: {
+          clave: string
+          id: string
+          product_id: string | null
+          temporal: boolean
+          valor: string
+          verified_at: string
+          vigente: boolean
+        }
+        Insert: {
+          clave: string
+          id?: string
+          product_id?: string | null
+          temporal?: boolean
+          valor: string
+          verified_at?: string
+          vigente?: boolean
+        }
+        Update: {
+          clave?: string
+          id?: string
+          product_id?: string | null
+          temporal?: boolean
+          valor?: string
+          verified_at?: string
+          vigente?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "business_facts_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       categories: {
         Row: {
           created_at: string
@@ -79,7 +117,11 @@ export type Database = {
       }
       components: {
         Row: {
+          activo: boolean
+          codigo: string | null
+          color: string | null
           created_at: string
+          equivalencia: string | null
           group_member_id: string | null
           id: string
           minutos_placa: number | null
@@ -90,10 +132,15 @@ export type Database = {
           rinde_por_placa: number | null
           stock_minimo: number
           stock_real: number
+          unidad: string
           updated_at: string
         }
         Insert: {
+          activo?: boolean
+          codigo?: string | null
+          color?: string | null
           created_at?: string
+          equivalencia?: string | null
           group_member_id?: string | null
           id?: string
           minutos_placa?: number | null
@@ -104,10 +151,15 @@ export type Database = {
           rinde_por_placa?: number | null
           stock_minimo?: number
           stock_real?: number
+          unidad?: string
           updated_at?: string
         }
         Update: {
+          activo?: boolean
+          codigo?: string | null
+          color?: string | null
           created_at?: string
+          equivalencia?: string | null
           group_member_id?: string | null
           id?: string
           minutos_placa?: number | null
@@ -118,6 +170,7 @@ export type Database = {
           rinde_por_placa?: number | null
           stock_minimo?: number
           stock_real?: number
+          unidad?: string
           updated_at?: string
         }
         Relationships: [
@@ -262,6 +315,220 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      inventory_legacy_snapshot: {
+        Row: {
+          captured_at: string
+          id: string
+          payload: Json
+        }
+        Insert: {
+          captured_at?: string
+          id?: string
+          payload: Json
+        }
+        Update: {
+          captured_at?: string
+          id?: string
+          payload?: Json
+        }
+        Relationships: []
+      }
+      inventory_movement_lines: {
+        Row: {
+          component_id: string | null
+          created_at: string
+          delta: number
+          entity_type: string
+          id: string
+          operation_id: string
+          product_variant_id: string | null
+          quantity_after: number
+          quantity_before: number
+          snapshot: Json | null
+        }
+        Insert: {
+          component_id?: string | null
+          created_at?: string
+          delta: number
+          entity_type: string
+          id?: string
+          operation_id: string
+          product_variant_id?: string | null
+          quantity_after: number
+          quantity_before: number
+          snapshot?: Json | null
+        }
+        Update: {
+          component_id?: string | null
+          created_at?: string
+          delta?: number
+          entity_type?: string
+          id?: string
+          operation_id?: string
+          product_variant_id?: string | null
+          quantity_after?: number
+          quantity_before?: number
+          snapshot?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_movement_lines_component_id_fkey"
+            columns: ["component_id"]
+            isOneToOne: false
+            referencedRelation: "components"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movement_lines_operation_id_fkey"
+            columns: ["operation_id"]
+            isOneToOne: false
+            referencedRelation: "inventory_operations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movement_lines_product_variant_id_fkey"
+            columns: ["product_variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inventory_operations: {
+        Row: {
+          created_at: string
+          id: string
+          idempotency_key: string
+          meta: Json | null
+          nota: string | null
+          order_id: string | null
+          tipo: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          idempotency_key: string
+          meta?: Json | null
+          nota?: string | null
+          order_id?: string | null
+          tipo: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          idempotency_key?: string
+          meta?: Json | null
+          nota?: string | null
+          order_id?: string | null
+          tipo?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_operations_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "ml_orders"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inventory_reservations: {
+        Row: {
+          created_at: string
+          estado: string
+          id: string
+          missing_qty: number | null
+          order_id: string
+          order_item_id: string
+          product_variant_id: string
+          requested_qty: number
+          reserved_qty: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          estado?: string
+          id?: string
+          missing_qty?: number | null
+          order_id: string
+          order_item_id: string
+          product_variant_id: string
+          requested_qty: number
+          reserved_qty?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          estado?: string
+          id?: string
+          missing_qty?: number | null
+          order_id?: string
+          order_item_id?: string
+          product_variant_id?: string
+          requested_qty?: number
+          reserved_qty?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_reservations_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "ml_orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_reservations_order_item_id_fkey"
+            columns: ["order_item_id"]
+            isOneToOne: true
+            referencedRelation: "ml_order_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_reservations_product_variant_id_fkey"
+            columns: ["product_variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inventory_returns: {
+        Row: {
+          created_at: string
+          id: string
+          operation_id: string
+          order_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          operation_id: string
+          order_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          operation_id?: string
+          order_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_returns_operation_id_fkey"
+            columns: ["operation_id"]
+            isOneToOne: false
+            referencedRelation: "inventory_operations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_returns_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: true
+            referencedRelation: "ml_orders"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       listing_groups: {
         Row: {
@@ -427,6 +694,7 @@ export type Database = {
           permalink: string | null
           precio: number | null
           product_id: string | null
+          product_variant_id: string | null
           raw: Json | null
           reemplazada_por: string | null
           sincronizado_at: string | null
@@ -449,6 +717,7 @@ export type Database = {
           permalink?: string | null
           precio?: number | null
           product_id?: string | null
+          product_variant_id?: string | null
           raw?: Json | null
           reemplazada_por?: string | null
           sincronizado_at?: string | null
@@ -471,6 +740,7 @@ export type Database = {
           permalink?: string | null
           precio?: number | null
           product_id?: string | null
+          product_variant_id?: string | null
           raw?: Json | null
           reemplazada_por?: string | null
           sincronizado_at?: string | null
@@ -492,6 +762,13 @@ export type Database = {
             columns: ["product_id"]
             isOneToOne: false
             referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ml_listings_product_variant_id_fkey"
+            columns: ["product_variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
             referencedColumns: ["id"]
           },
         ]
@@ -595,6 +872,71 @@ export type Database = {
         }
         Relationships: []
       }
+      ml_questions: {
+        Row: {
+          automatico: boolean
+          buyer_id: string | null
+          estado_ml: string
+          estado_panel: string
+          id: string
+          ml_item_id: string
+          motivo_revision: string | null
+          pregunta: string
+          preguntada_at: string
+          product_id: string | null
+          raw: Json | null
+          respondida_at: string | null
+          respuesta: string | null
+          respuesta_usuario: string | null
+          sugerencia: string | null
+          updated_at: string
+        }
+        Insert: {
+          automatico?: boolean
+          buyer_id?: string | null
+          estado_ml: string
+          estado_panel?: string
+          id: string
+          ml_item_id: string
+          motivo_revision?: string | null
+          pregunta: string
+          preguntada_at: string
+          product_id?: string | null
+          raw?: Json | null
+          respondida_at?: string | null
+          respuesta?: string | null
+          respuesta_usuario?: string | null
+          sugerencia?: string | null
+          updated_at?: string
+        }
+        Update: {
+          automatico?: boolean
+          buyer_id?: string | null
+          estado_ml?: string
+          estado_panel?: string
+          id?: string
+          ml_item_id?: string
+          motivo_revision?: string | null
+          pregunta?: string
+          preguntada_at?: string
+          product_id?: string | null
+          raw?: Json | null
+          respondida_at?: string | null
+          respuesta?: string | null
+          respuesta_usuario?: string | null
+          sugerencia?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ml_questions_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       product_variants: {
         Row: {
           activo: boolean
@@ -651,6 +993,70 @@ export type Database = {
             columns: ["product_id"]
             isOneToOne: false
             referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      production_runs: {
+        Row: {
+          cantidad: number
+          completed_at: string | null
+          component_id: string | null
+          created_at: string
+          estado: string
+          id: string
+          nota: string | null
+          operation_id: string | null
+          placas: number | null
+          product_variant_id: string | null
+          tipo: string
+        }
+        Insert: {
+          cantidad: number
+          completed_at?: string | null
+          component_id?: string | null
+          created_at?: string
+          estado?: string
+          id?: string
+          nota?: string | null
+          operation_id?: string | null
+          placas?: number | null
+          product_variant_id?: string | null
+          tipo: string
+        }
+        Update: {
+          cantidad?: number
+          completed_at?: string | null
+          component_id?: string | null
+          created_at?: string
+          estado?: string
+          id?: string
+          nota?: string | null
+          operation_id?: string | null
+          placas?: number | null
+          product_variant_id?: string | null
+          tipo?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "production_runs_component_id_fkey"
+            columns: ["component_id"]
+            isOneToOne: false
+            referencedRelation: "components"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "production_runs_operation_id_fkey"
+            columns: ["operation_id"]
+            isOneToOne: false
+            referencedRelation: "inventory_operations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "production_runs_product_variant_id_fkey"
+            columns: ["product_variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
             referencedColumns: ["id"]
           },
         ]
@@ -718,12 +1124,14 @@ export type Database = {
       products: {
         Row: {
           activo: boolean
+          catalog_locked: boolean
           category_id: string | null
           created_at: string
           descontinuado: boolean
           group_id: string | null
           id: string
           nombre: string
+          nombre_interno: string | null
           notas: string | null
           sku_base: string | null
           updated_at: string
@@ -731,12 +1139,14 @@ export type Database = {
         }
         Insert: {
           activo?: boolean
+          catalog_locked?: boolean
           category_id?: string | null
           created_at?: string
           descontinuado?: boolean
           group_id?: string | null
           id?: string
           nombre: string
+          nombre_interno?: string | null
           notas?: string | null
           sku_base?: string | null
           updated_at?: string
@@ -744,12 +1154,14 @@ export type Database = {
         }
         Update: {
           activo?: boolean
+          catalog_locked?: boolean
           category_id?: string | null
           created_at?: string
           descontinuado?: boolean
           group_id?: string | null
           id?: string
           nombre?: string
+          nombre_interno?: string | null
           notas?: string | null
           sku_base?: string | null
           updated_at?: string
@@ -772,20 +1184,195 @@ export type Database = {
           },
         ]
       }
+      push_deliveries: {
+        Row: {
+          created_at: string
+          dedupe_key: string
+          error: string | null
+          estado: string
+          id: string
+          sent_at: string | null
+          subscription_id: string
+        }
+        Insert: {
+          created_at?: string
+          dedupe_key: string
+          error?: string | null
+          estado?: string
+          id?: string
+          sent_at?: string | null
+          subscription_id: string
+        }
+        Update: {
+          created_at?: string
+          dedupe_key?: string
+          error?: string | null
+          estado?: string
+          id?: string
+          sent_at?: string | null
+          subscription_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "push_deliveries_subscription_id_fkey"
+            columns: ["subscription_id"]
+            isOneToOne: false
+            referencedRelation: "push_subscriptions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      push_subscriptions: {
+        Row: {
+          activo: boolean
+          auth: string
+          created_at: string
+          endpoint: string
+          id: string
+          last_error: string | null
+          last_success_at: string | null
+          p256dh: string
+          user_agent: string | null
+        }
+        Insert: {
+          activo?: boolean
+          auth: string
+          created_at?: string
+          endpoint: string
+          id?: string
+          last_error?: string | null
+          last_success_at?: string | null
+          p256dh: string
+          user_agent?: string | null
+        }
+        Update: {
+          activo?: boolean
+          auth?: string
+          created_at?: string
+          endpoint?: string
+          id?: string
+          last_error?: string | null
+          last_success_at?: string | null
+          p256dh?: string
+          user_agent?: string | null
+        }
+        Relationships: []
+      }
+      question_jobs: {
+        Row: {
+          created_at: string
+          estado: string
+          id: string
+          intentos: number
+          question_id: string
+          run_after: string
+          ultimo_error: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          estado?: string
+          id?: string
+          intentos?: number
+          question_id: string
+          run_after?: string
+          ultimo_error?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          estado?: string
+          id?: string
+          intentos?: number
+          question_id?: string
+          run_after?: string
+          ultimo_error?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "question_jobs_question_id_fkey"
+            columns: ["question_id"]
+            isOneToOne: true
+            referencedRelation: "ml_questions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      question_knowledge: {
+        Row: {
+          created_at: string
+          fuente: string
+          id: string
+          pregunta: string
+          product_id: string | null
+          respuesta: string
+          source_question_id: string | null
+          temporal: boolean
+          verified_at: string | null
+          vigente: boolean
+        }
+        Insert: {
+          created_at?: string
+          fuente?: string
+          id?: string
+          pregunta: string
+          product_id?: string | null
+          respuesta: string
+          source_question_id?: string | null
+          temporal?: boolean
+          verified_at?: string | null
+          vigente?: boolean
+        }
+        Update: {
+          created_at?: string
+          fuente?: string
+          id?: string
+          pregunta?: string
+          product_id?: string | null
+          respuesta?: string
+          source_question_id?: string | null
+          temporal?: boolean
+          verified_at?: string | null
+          vigente?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "question_knowledge_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "question_knowledge_source_question_id_fkey"
+            columns: ["source_question_id"]
+            isOneToOne: false
+            referencedRelation: "ml_questions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       variant_components: {
         Row: {
           cantidad: number
           component_id: string
+          notas: string | null
+          updated_at: string
           variant_id: string
         }
         Insert: {
           cantidad?: number
           component_id: string
+          notas?: string | null
+          updated_at?: string
           variant_id: string
         }
         Update: {
           cantidad?: number
           component_id?: string
+          notas?: string | null
+          updated_at?: string
           variant_id?: string
         }
         Relationships: [
@@ -810,6 +1397,53 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      inventory_adjust: {
+        Args: {
+          p_entity_id: string
+          p_entity_type: string
+          p_idempotency_key: string
+          p_new_qty: number
+          p_reason: string
+        }
+        Returns: string
+      }
+      inventory_assemble: {
+        Args: {
+          p_idempotency_key: string
+          p_note: string
+          p_quantity: number
+          p_variant_id: string
+        }
+        Returns: string
+      }
+      inventory_fulfill_order: {
+        Args: { p_idempotency_key: string; p_order_id: string }
+        Returns: string
+      }
+      inventory_rebalance_variant: {
+        Args: { p_variant_id: string }
+        Returns: undefined
+      }
+      inventory_register_print: {
+        Args: {
+          p_component_id: string
+          p_idempotency_key: string
+          p_note: string
+          p_plates: number
+          p_quantity: number
+        }
+        Returns: string
+      }
+      inventory_release_order: { Args: { p_order_id: string }; Returns: number }
+      inventory_reserve_order: { Args: { p_order_id: string }; Returns: number }
+      inventory_return_order: {
+        Args: { p_idempotency_key: string; p_note: string; p_order_id: string }
+        Returns: string
+      }
+      inventory_set_recipe: {
+        Args: { p_lines: Json; p_variant_id: string }
+        Returns: number
+      }
       panel_metricas: { Args: { p_dias?: number }; Returns: Json }
     }
     Enums: {

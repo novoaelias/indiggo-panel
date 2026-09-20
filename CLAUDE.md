@@ -108,7 +108,9 @@ order already shipped, stock comes back only by registering the physical return
 `claude-sonnet-5`; `mensajeConImagenes` for vision by public URL). `worker/lib/kie.ts` = kie.ai
 for image/video. Every AI route returns a **proposal** for review; a separate endpoint, called
 only on explicit confirmation in the UI, applies it to MercadoLibre. New listings
-(`POST /api/ia/publicar`) and SEO re-publications are always created **`paused`**.
+(`POST /api/ia/publicar`) and SEO re-publications are always created **`paused`**. Every path
+that creates or re-publishes an item must request `shipping.mode = me2`, remove any per-item
+Flex opt-in, and verify **Mercado Envíos without Flex before the item may be activated**.
 
 ### Other cross-cutting things
 

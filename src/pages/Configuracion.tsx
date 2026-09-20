@@ -451,15 +451,13 @@ function FlexSection() {
   const [corriendo, setCorriendo] = useState(false);
   const [msg, setMsg] = useState<string>();
 
-  const ocultar = !data?.oculto; // si hoy está visible, la acción es ocultar
-
   async function ejecutar() {
     setCorriendo(true);
     setMsg(undefined);
     try {
       const r = await api<{ tocados: number; pendientes: number; errores: string[] }>(
         "/ml/flex",
-        { method: "POST", body: JSON.stringify({ ocultar }) },
+        { method: "POST", body: JSON.stringify({ ocultar: true }) },
       );
       setMsg(
         `${r.tocados} publicación(es) actualizada(s)` +
@@ -482,10 +480,9 @@ function FlexSection() {
         {data && (
           <div className="flex flex-col gap-4">
             <p className="max-w-prose text-[13.5px] text-ink/55">
-              Saca (o vuelve a poner) <b>Envío Flex</b> como opción de envío en{" "}
-              <b>todas</b> tus publicaciones activas, de una. No desactiva Flex en
-              tu cuenta — sólo deja de ofrecerse a los compradores hasta que lo
-              vuelvas a activar acá.
+              La política de Indiggo es <b>Mercado Envíos sin Flex</b>. El panel
+              quita Flex de las publicaciones actuales, lo verifica al crear o
+              republicar y vuelve a controlarlo en cada sincronización.
             </p>
             <p className="max-w-prose rounded-[10px] bg-warn-bg px-3 py-2 text-[12px] text-warn">
               Ojo: Mercado Libre sólo deja hacer esto por API si la app tiene el
@@ -507,28 +504,30 @@ function FlexSection() {
               <span
                 className={
                   "inline-block h-2.5 w-2.5 rounded-full " +
-                  (data.oculto ? "bg-warn" : "bg-ok")
+                  (data.oculto && data.con_flex === 0 ? "bg-ok" : "bg-warn")
                 }
               />
-              {data.oculto ? (
+              {data.oculto && data.con_flex === 0 ? (
                 <span>
-                  Flex <b>oculto</b>
+                  Flex <b>deshabilitado</b> en todas las publicaciones activas
                   {data.desde &&
                     ` desde el ${new Date(data.desde).toLocaleDateString("es-AR")}`}
-                  {data.con_flex > 0 &&
-                    ` · ${data.con_flex} publicación(es) todavía lo tienen`}
                 </span>
               ) : (
                 <span>
-                  Flex <b>visible</b> en {data.con_flex} de {data.activas}{" "}
-                  publicaciones
+                  Hay <b>{data.con_flex}</b> de {data.activas} publicaciones
+                  activas que todavía requieren quitar Flex
                 </span>
               )}
             </div>
 
             {msg && <div className="text-[12.5px] text-ink/60">{msg}</div>}
 
-            {!confirmar ? (
+            {data.oculto && data.con_flex === 0 ? (
+              <div className="text-[12px] font-semibold text-ok">
+                Política activa y verificada.
+              </div>
+            ) : !confirmar ? (
               <div>
                 <button
                   onClick={() => {
@@ -537,29 +536,24 @@ function FlexSection() {
                   }}
                   className={
                     "rounded-[9px] px-4 py-2.5 text-[13.5px] font-bold text-white " +
-                    (ocultar
-                      ? "bg-warn hover:opacity-90"
-                      : "bg-accent hover:bg-accent-hover")
+                    "bg-warn hover:opacity-90"
                   }
                 >
-                  {ocultar
-                    ? "Ocultar Flex de todas las publicaciones"
-                    : "Volver a mostrar Flex en todas"}
+                  Quitar Flex y dejar la política activa
                 </button>
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-2.5 rounded-[10px] bg-ink/[0.03] p-3">
                 <span className="text-[13px] font-semibold">
-                  {ocultar
-                    ? `¿Ocultar Flex de ${data.con_flex} publicación(es)?`
-                    : `¿Volver a mostrar Flex en ${data.activas - data.con_flex} publicación(es)?`}
+                  ¿Quitar Flex de {data.con_flex} publicación(es) y mantenerlo
+                  deshabilitado en las nuevas?
                 </span>
                 <button
                   onClick={ejecutar}
                   disabled={corriendo}
                   className={
                     "rounded-[9px] px-4 py-2 text-[13px] font-bold text-white disabled:opacity-50 " +
-                    (ocultar ? "bg-warn" : "bg-accent")
+                    "bg-warn"
                   }
                 >
                   {corriendo ? "Aplicando…" : "Sí, confirmar"}

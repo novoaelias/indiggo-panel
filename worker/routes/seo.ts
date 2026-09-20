@@ -14,6 +14,10 @@ import { mlFetch } from "../lib/ml";
 import { claude, parseJsonLaxo } from "../lib/claude";
 import { syncOneItem } from "../lib/sync";
 import { derivarCatalogo } from "../lib/derivar";
+import {
+  garantizarMercadoEnviosSinFlex,
+  mercadoEnviosSinFlex,
+} from "../lib/shipping";
 
 export const seo = new Hono<{ Bindings: Env }>();
 
@@ -409,6 +413,116 @@ Devolvé SOLO este JSON:
   });
 });
 
+// ---------- POST /seo/contenido/analizar ----------
+// Compara publicaciones hermanas del mismo producto físico. Sólo propone qué
+// corregir; la edición real sigue pasando por el modal de IA y confirmación.
+seo.post("/contenido/analizar", async (c) => {
+  const db = supa(c.env);
+  const { data: listings, error } = await db
+    .from("ml_listings")
+    .select(
+      "id,ml_item_id,product_id,titulo,precio,moneda,raw,products(nombre,nombre_interno)",
+    )
+    .in("estado", ["active", "paused"])
+    .is("reemplazada_por", null)
+    .not("product_id", "is", null);
+  if (error) return c.json({ error: error.message }, 500);
+
+  const porProducto = new Map<string, any[]>();
+  for (const listing of listings ?? []) {
+    if (!listing.product_id) continue;
+    const group = porProducto.get(listing.product_id) ?? [];
+    group.push(listing);
+    porProducto.set(listing.product_id, group);
+  }
+  const grupos = [...porProducto.entries()].filter(([, rows]) => rows.length > 1);
+  if (!grupos.length) return c.json({ grupos: [], analizados: 0 });
+
+  const entrada: any[] = [];
+  for (const [productId, rows] of grupos.slice(0, 30)) {
+    const publicaciones = await Promise.all(
+      rows.map(async (row) => {
+        let descripcion = "";
+        try {
+          const response = await mlFetch(
+            c.env,
+            db,
+            `/items/${row.ml_item_id}/description`,
+          );
+          if (response.ok)
+            descripcion =
+              ((await response.json()) as { plain_text?: string }).plain_text ?? "";
+        } catch {
+          /* se compara lo demás */
+        }
+        const atributos = Array.isArray((row.raw as any)?.attributes)
+          ? (row.raw as any).attributes
+              .filter((attr: any) => attr?.name && attr?.value_name)
+              .slice(0, 25)
+              .map((attr: any) => `${attr.name}: ${attr.value_name}`)
+          : [];
+        return {
+          listing_id: row.id,
+          ml_item_id: row.ml_item_id,
+          titulo: row.titulo,
+          precio: row.precio,
+          moneda: row.moneda,
+          atributos,
+          descripcion: descripcion.slice(0, 1800),
+        };
+      }),
+    );
+    const product = rows[0]?.products as
+      | { nombre?: string; nombre_interno?: string | null }
+      | null;
+    entrada.push({
+      product_id: productId,
+      producto: product?.nombre_interno || product?.nombre || "Producto",
+      publicaciones,
+    });
+  }
+
+  const resultados: any[] = [];
+  for (let index = 0; index < entrada.length; index += 5) {
+    const lote = entrada.slice(index, index + 5);
+    const { texto } = await claude(c.env, {
+      model: "claude-haiku-4-5",
+      maxTokens: 2600,
+      system: [
+        "Auditás publicaciones hermanas de Mercado Libre Argentina que venden el mismo producto físico.",
+        "Marcá sólo diferencias relevantes para el comprador y contradicciones reales: cantidad incluida, material, medidas, color, compatibilidad, condición, contenido del pack, retiro o promesas de entrega.",
+        "No marques como contradicción simples diferencias de SEO, orden, cuotas o precio entre publicaciones.",
+        "No cambies nada. Prepará un objetivo concreto para que otro redactor corrija la publicación más incompleta o contradictoria.",
+        'Respondé JSON estricto: {"grupos":[{"product_id":"...","diferencias_relevantes":["..."],"contradicciones":["..."],"listing_id_a_corregir":"uuid o null","objetivo_correccion":"..."}]}',
+      ].join("\n"),
+      messages: [{ role: "user", content: JSON.stringify(lote) }],
+    });
+    const parsed = parseJsonLaxo<{ grupos?: any[] }>(texto);
+    resultados.push(...(parsed.grupos ?? []));
+  }
+
+  const porId = new Map(entrada.map((group) => [group.product_id, group]));
+  return c.json({
+    analizados: entrada.length,
+    grupos: resultados
+      .map((resultado) => ({
+        ...resultado,
+        producto: porId.get(resultado.product_id)?.producto ?? "Producto",
+        publicaciones:
+          porId.get(resultado.product_id)?.publicaciones.map((item: any) => ({
+            id: item.listing_id,
+            ml_item_id: item.ml_item_id,
+            titulo: item.titulo,
+          })) ?? [],
+      }))
+      .filter(
+        (resultado) =>
+          resultado.contradicciones?.length ||
+          resultado.diferencias_relevantes?.length,
+      ),
+  });
+});
+
 // ---------- GET /seo/categorias — las que usa el vendedor + búsqueda ----------
 seo.get("/categorias", async (c) => {
   const db = supa(c.env);
@@ -505,6 +619,7 @@ function armarItem(
     available_quantity: Math.max(item.available_quantity ?? 1, 1),
     pictures: pics,
     attributes: [...byId.values()],
+    shipping: mercadoEnviosSinFlex(Boolean(item.shipping?.free_shipping)),
   };
 
   const saleTermsOk = new Set(["WARRANTY_TYPE", "WARRANTY_TIME"]);
@@ -519,17 +634,31 @@ async function crearItem(
   db: DB,
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; id?: string; permalink?: string; error?: string }> {
-  const r = await mlFetch(env, db, "/items", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const j = (await r.json().catch(() => ({}))) as {
+  type RespuestaCreacion = {
     id?: string;
     permalink?: string;
     cause?: Array<{ type?: string; code?: string; message?: string }>;
     message?: string;
   };
+  const post = async (payload: Record<string, unknown>) => {
+    const response = await mlFetch(env, db, "/items", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const json = (await response.json().catch(() => ({}))) as RespuestaCreacion;
+    return { response, json };
+  };
+  let { response: r, json: j } = await post(body);
+  const rechazoInicial = JSON.stringify(j).toLowerCase();
+  if (
+    (!r.ok || !j.id) &&
+    (rechazoInicial.includes("shipping") || rechazoInicial.includes("lost_me1"))
+  ) {
+    const sinShipping = { ...body };
+    delete sinShipping.shipping;
+    ({ response: r, json: j } = await post(sinShipping));
+  }
   if (r.ok && j.id) return { ok: true, id: j.id, permalink: j.permalink };
   const errs = (j.cause ?? [])
     .filter((x) => (x.type ?? "error") === "error")
@@ -762,14 +891,39 @@ seo.post("/publicacion/:id/republicar", async (c) => {
   else avisos.push("El título lo compone Mercado Libre (family_name). Revisalo.");
   if (usado && !usado.picsById)
     avisos.push("Se re-subieron las fotos; revisá el orden.");
-  avisos.push("El envío quedó con la config por defecto de tu cuenta — revisalo.");
+  // Flex puede heredarse de la cuenta aunque se pida ME2. Verificarlo antes de
+  // cerrar la publicación vieja evita dejar al vendedor sin la publicación
+  // correcta si Mercado Libre no permite quitar Flex.
+  const envio = await garantizarMercadoEnviosSinFlex(c.env, db, nuevo);
 
-  // pausar + descripción
-  await mlFetch(c.env, db, `/items/${nuevo}`, {
+  // pausar + descripción (también se pausa si la garantía de envío falló)
+  const pausaNueva = await mlFetch(c.env, db, `/items/${nuevo}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ status: "paused" }),
   });
+  if (!pausaNueva.ok)
+    avisos.push("Mercado Libre no confirmó la pausa de la publicación nueva.");
+  if (!envio.ok) {
+    avisos.push(
+      `NO ACTIVAR: no pude confirmar Mercado Envíos sin Flex. ${envio.detalle ?? "Revisá el envío en Mercado Libre."}`,
+    );
+    return c.json(
+      {
+        nuevo_item_id: nuevo,
+        permalink: creado.permalink ?? null,
+        cerrada_vieja: false,
+        envio_verificado: false,
+        modo_envio: envio.mode,
+        flex: envio.flex,
+        avisos,
+        error:
+          "La publicación nueva quedó pausada y la anterior sigue intacta porque no se pudo garantizar Mercado Envíos sin Flex.",
+      },
+      409,
+    );
+  }
+  avisos.push("Envío verificado: Mercado Envíos sin Flex.");
   if (descripcion.trim()) {
     const rd = await mlFetch(c.env, db, `/items/${nuevo}/description`, {
       method: "PUT",
@@ -839,6 +993,9 @@ seo.post("/publicacion/:id/republicar", async (c) => {
     nuevo_item_id: nuevo,
     permalink: creado.permalink ?? null,
     cerrada_vieja,
+    envio_verificado: envio.ok,
+    modo_envio: envio.mode,
+    flex: envio.flex,
     avisos,
   });
 });

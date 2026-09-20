@@ -68,6 +68,10 @@ npx wrangler secret bulk .dev.vars   # sube los secretos al Worker desplegado
 
 El `access_token` (6 h) se refresca solo por cron cada 4 h; el sync corre cada hora.
 
+Todas las publicaciones creadas desde el panel, incluidas las republicaciones, se crean en
+pausa y deben quedar verificadas con **Mercado Envíos sin Flex**. El cron también corrige Flex
+si Mercado Libre lo vuelve a habilitar o si una publicación entró por fuera del panel.
+
 ML también notifica en tiempo real. En el devcenter, la app tiene la misma URL
 para el redirect de OAuth y para las notificaciones, así que el Worker acepta el
 POST de ML tanto en `/api/ml/notifications` como en `/api/ml/callback`.

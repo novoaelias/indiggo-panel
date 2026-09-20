@@ -6,6 +6,10 @@ import { costoUsd, generarImagen } from "../lib/kie";
 import { mlFetch } from "../lib/ml";
 import { syncOneItem } from "../lib/sync";
 import { derivarCatalogo } from "../lib/derivar";
+import {
+  garantizarMercadoEnviosSinFlex,
+  mercadoEnviosSinFlex,
+} from "../lib/shipping";
 
 export const ia = new Hono<{ Bindings: Env }>();
 
@@ -358,6 +362,7 @@ ia.post("/publicar", async (c) => {
     listing_type_id: "gold_special",
     pictures: poolUnico.map((source) => ({ source })),
     attributes: atributos,
+    shipping: mercadoEnviosSinFlex(false),
     ...(familyName ? { family_name: familyName } : {}),
   };
 
@@ -387,17 +392,36 @@ ia.post("/publicar", async (c) => {
     item.available_quantity = Math.max(body.stock ?? 1, 1);
   }
 
-  const r = await mlFetch(c.env, db, "/items", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(item),
-  });
-  const creado = (await r.json().catch(() => ({}))) as {
+  type RespuestaCreacion = {
     id?: string;
     permalink?: string;
     message?: string;
     cause?: Array<{ message?: string; code?: string }>;
   };
+  const crear = async () => {
+    const response = await mlFetch(c.env, db, "/items", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(item),
+    });
+    const json = (await response.json().catch(() => ({}))) as RespuestaCreacion;
+    return { response, json };
+  };
+  let { response: r, json: creado } = await crear();
+  const rechazoInicial = JSON.stringify(creado).toLowerCase();
+  if (
+    (!r.ok || !creado.id) &&
+    (rechazoInicial.includes("shipping") || rechazoInicial.includes("lost_me1"))
+  ) {
+    // Algunas cuentas administran ME2 a nivel de vendedor y rechazan `shipping`
+    // en el alta. Reintentamos sin ese bloque, pero la garantía poscreación sigue
+    // siendo obligatoria y deja el ítem pausado si no confirma ME2 sin Flex.
+    delete item.shipping;
+    ({ response: r, json: creado } = await crear());
+    avisos.push(
+      "Mercado Libre aplicó el envío desde la configuración de la cuenta; se verificó después del alta.",
+    );
+  }
   if (!r.ok || !creado.id) {
     const detalle =
       (creado.cause ?? [])
@@ -414,13 +438,23 @@ ia.post("/publicar", async (c) => {
     );
   }
 
-  // Confirmar la pausa antes de informar el resultado.
+  // Flex puede heredarse de la cuenta aunque el payload diga `mode: me2`.
+  // Se quita y se verifica ANTES de pausar, porque la API de Flex rechaza
+  // algunos ítems pausados con `item down`.
+  const envio = await garantizarMercadoEnviosSinFlex(c.env, db, creado.id);
+
+  // Confirmar la pausa antes de informar el resultado. Si la garantía de envío
+  // falló, igualmente se pausa para que nunca quede vendible por accidente.
   const pausa = await mlFetch(c.env, db, `/items/${creado.id}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ status: "paused" }),
   }).catch(() => null);
   if (!pausa?.ok) avisos.push("La publicación fue creada, pero Mercado Libre no confirmó la pausa. Revisá su estado desde el enlace antes de continuar.");
+  if (!envio.ok)
+    avisos.push(
+      `NO ACTIVAR: no pude confirmar Mercado Envíos sin Flex. ${envio.detalle ?? "Revisá el envío en Mercado Libre."}`,
+    );
 
   if (body.descripcion?.trim()) {
     const rd = await mlFetch(c.env, db, `/items/${creado.id}/description`, {
@@ -442,6 +476,9 @@ ia.post("/publicar", async (c) => {
     ml_item_id: creado.id,
     permalink: creado.permalink ?? null,
     pausada: pausa?.ok ?? false,
+    envio_verificado: envio.ok,
+    modo_envio: envio.mode,
+    flex: envio.flex,
     variantes: conVariantes ? variantesRaw.length : 0,
     avisos,
   });

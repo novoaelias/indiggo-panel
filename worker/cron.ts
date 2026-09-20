@@ -3,6 +3,7 @@ import { supa } from "./lib/supabase";
 import { getToken, validToken } from "./lib/ml";
 import { syncAll } from "./lib/sync";
 import { processPendingQuestions, reconcileQuestions } from "./lib/questions";
+import { aplicarPoliticaFlexOculta } from "./lib/shipping";
 
 /**
  * Cron triggers (ver `triggers.crons` en wrangler.jsonc):
@@ -25,10 +26,15 @@ export async function runCron(cron: string, env: Env): Promise<void> {
 
   if (cron === "15 * * * *") {
     const res = await syncAll(env, db);
+    const flex = await aplicarPoliticaFlexOculta(env, db).catch((error) => ({
+      revisadas: 0,
+      corregidas: 0,
+      errores: [(error as Error).message],
+    }));
     const preguntas = await reconcileQuestions(env, db as never).catch(() => 0);
     const procesadas = await processPendingQuestions(env, db as never).catch(() => 0);
     console.log(
-      `[cron] sync ML: ${res.publicaciones} publicaciones, ${res.pedidos} pedidos, ${preguntas} preguntas, ${procesadas} procesadas, ${res.errores.length} errores`,
+      `[cron] sync ML: ${res.publicaciones} publicaciones, ${res.pedidos} pedidos, ${preguntas} preguntas, ${procesadas} procesadas, Flex ${flex.corregidas}/${flex.revisadas}, ${res.errores.length + flex.errores.length} errores`,
     );
     return;
   }

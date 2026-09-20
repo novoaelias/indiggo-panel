@@ -54,6 +54,19 @@ interface Resp {
   conteo: Record<string, number>;
 }
 
+interface AuditoriaContenido {
+  analizados: number;
+  grupos: Array<{
+    product_id: string;
+    producto: string;
+    diferencias_relevantes: string[];
+    contradicciones: string[];
+    listing_id_a_corregir: string | null;
+    objetivo_correccion: string;
+    publicaciones: Array<{ id: string; ml_item_id: string; titulo: string }>;
+  }>;
+}
+
 const ESTADO_META: Record<string, { label: string; tono: EstadoTono }> = {
   active: { label: "Activa", tono: "ok" },
   paused: { label: "Pausada", tono: "warn" },
@@ -88,12 +101,15 @@ export function Publicaciones() {
     `/publicaciones${qs ? `?${qs}` : ""}`,
   );
   const [iaPara, setIaPara] = useState<PublicacionApi | null>(null);
+  const [iaObjetivo, setIaObjetivo] = useState("");
   const [varPara, setVarPara] = useState<PublicacionApi | null>(null);
   const [catPara, setCatPara] = useState<PublicacionApi | null>(null);
   const [nueva, setNueva] = useState(false);
   const [precios, setPrecios] = useState(false);
   const [analizando, setAnalizando] = useState(false);
   const [analisisMsg, setAnalisisMsg] = useState<string>();
+  const [auditandoContenido, setAuditandoContenido] = useState(false);
+  const [auditoriaContenido, setAuditoriaContenido] = useState<AuditoriaContenido>();
 
   async function alternarDescontinuada(p: PublicacionApi) {
     const descontinuar = !p.descontinuada;
@@ -136,6 +152,24 @@ export function Publicaciones() {
     }
   }
 
+  async function analizarContenido() {
+    setAuditandoContenido(true);
+    setAnalisisMsg(undefined);
+    try {
+      const resultado = await api<AuditoriaContenido>("/seo/contenido/analizar", {
+        method: "POST",
+      });
+      setAuditoriaContenido(resultado);
+      setAnalisisMsg(
+        `${resultado.analizados} producto(s) comparados · ${resultado.grupos.length} con diferencias para revisar`,
+      );
+    } catch (e) {
+      setAnalisisMsg((e as Error).message);
+    } finally {
+      setAuditandoContenido(false);
+    }
+  }
+
   const problemas = (data?.publicaciones ?? []).filter(
     (p) => p.categoria_analisis && !p.categoria_analisis.coincide,
   );
@@ -161,9 +195,11 @@ export function Publicaciones() {
       {iaPara && (
         <SugerenciaModal
           publicacion={iaPara}
-          onClose={() => setIaPara(null)}
+          objetivoInicial={iaObjetivo}
+          onClose={() => { setIaPara(null); setIaObjetivo(""); }}
           onAplicado={() => {
             setIaPara(null);
+            setIaObjetivo("");
             reload();
           }}
         />
@@ -222,6 +258,7 @@ export function Publicaciones() {
           <>
             <details className="action-menu"><summary>Herramientas</summary><div>
               <button disabled={analizando} onClick={analizarCategorias}>{analizando ? "Revisando…" : "Revisar categorías"}</button>
+              <button disabled={auditandoContenido} onClick={analizarContenido}>{auditandoContenido ? "Comparando…" : "Comparar contenido entre publicaciones"}</button>
               <button onClick={() => setPrecios(true)}>Actualizar precios en lote</button>
             </div></details>
             <PrimaryButton onClick={() => setNueva(true)}>+ Nueva publicación</PrimaryButton>
@@ -233,6 +270,44 @@ export function Publicaciones() {
         <div className="mb-4 rounded-[12px] bg-accent-soft px-4 py-2.5 text-[12.5px] text-accent">
           {analisisMsg}
         </div>
+      )}
+
+      {auditoriaContenido && auditoriaContenido.grupos.length > 0 && (
+        <Card className="mb-5">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-[14px] font-semibold">Diferencias de contenido para revisar</h2>
+            <button className="text-[12px] text-ink/45" onClick={() => setAuditoriaContenido(undefined)}>Cerrar</button>
+          </div>
+          <div className="flex flex-col gap-3">
+            {auditoriaContenido.grupos.map((group) => {
+              const targetId = group.listing_id_a_corregir || group.publicaciones[0]?.id;
+              const target = data?.publicaciones.find((item) => item.id === targetId);
+              return (
+                <div key={group.product_id} className="rounded-lg border border-ink/10 p-3">
+                  <div className="text-[13px] font-semibold">{group.producto}</div>
+                  {group.contradicciones?.length > 0 && (
+                    <ul className="mt-2 list-disc pl-5 text-[12px] text-danger">
+                      {group.contradicciones.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  )}
+                  {group.diferencias_relevantes?.length > 0 && (
+                    <ul className="mt-2 list-disc pl-5 text-[12px] text-ink/55">
+                      {group.diferencias_relevantes.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  )}
+                  {group.objetivo_correccion && <p className="mt-2 text-[11.5px] text-ink/45">Corrección preparada: {group.objetivo_correccion}</p>}
+                  {target && (
+                    <div className="mt-3">
+                      <GhostButton onClick={() => { setIaObjetivo(group.objetivo_correccion); setIaPara(target); }}>
+                        Preparar corrección para revisar
+                      </GhostButton>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
       )}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -380,14 +455,16 @@ interface Sugerencia {
 
 function SugerenciaModal({
   publicacion,
+  objetivoInicial = "",
   onClose,
   onAplicado,
 }: {
   publicacion: PublicacionApi;
+  objetivoInicial?: string;
   onClose: () => void;
   onAplicado: () => void;
 }) {
-  const [objetivo, setObjetivo] = useState("");
+  const [objetivo, setObjetivo] = useState(objetivoInicial);
   const [cargando, setCargando] = useState(false);
   const [sug, setSug] = useState<Sugerencia>();
   const [err, setErr] = useState<string>();
@@ -859,7 +936,12 @@ function DuplicarModal({
 
   const [publicando, setPublicando] = useState(false);
   const [resultado, setResultado] =
-    useState<{ permalink: string | null; pausada?: boolean; avisos: string[] }>();
+    useState<{
+      permalink: string | null;
+      pausada?: boolean;
+      envio_verificado?: boolean;
+      avisos: string[];
+    }>();
 
   const faltanRequeridos = atributos.filter((a) => a.requerido && !a.valor.trim());
 
@@ -901,7 +983,12 @@ function DuplicarModal({
     setPublicando(true);
     setErr(undefined);
     try {
-      const r = await api<{ permalink: string | null; pausada?: boolean; avisos: string[] }>(
+      const r = await api<{
+        permalink: string | null;
+        pausada?: boolean;
+        envio_verificado?: boolean;
+        avisos: string[];
+      }>(
         "/ia/publicar",
         {
           method: "POST",
@@ -946,6 +1033,7 @@ function DuplicarModal({
           <div className="flex flex-col gap-3 text-[13.5px]">
             <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
               Publicación creada. <b>{resultado.pausada ? "En pausa, lista para revisar." : "Revisá su estado en Mercado Libre."}</b>
+              {resultado.envio_verificado && " Mercado Envíos sin Flex verificado."}
             </div>
             {resultado.avisos?.length > 0 && (
               <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
@@ -1288,7 +1376,12 @@ function NuevaPublicacionModal({
   const [varAttrId, setVarAttrId] = useState("");
   const [publicando, setPublicando] = useState(false);
   const [resultado, setResultado] =
-    useState<{ permalink: string | null; pausada?: boolean; avisos: string[] }>();
+    useState<{
+      permalink: string | null;
+      pausada?: boolean;
+      envio_verificado?: boolean;
+      avisos: string[];
+    }>();
 
   const varsListas = vars.filter((v) => v.nombre.trim());
 
@@ -1349,7 +1442,12 @@ function NuevaPublicacionModal({
         prop?.variacion?.atributos.find((a) => a.id === varAttrId)?.nombre ||
         eje.trim() ||
         "Variante";
-      const r = await api<{ permalink: string | null; pausada?: boolean; avisos: string[] }>(
+      const r = await api<{
+        permalink: string | null;
+        pausada?: boolean;
+        envio_verificado?: boolean;
+        avisos: string[];
+      }>(
         "/ia/publicar",
         {
           method: "POST",
@@ -1402,8 +1500,10 @@ function NuevaPublicacionModal({
         {resultado ? (
           <div className="flex flex-col gap-3 text-[13.5px]">
             <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
-              Publicación creada. <b>{resultado.pausada ? "En pausa." : "Revisá su estado en Mercado Libre."}</b> Revisá fotos, variantes y envío
-              en Mercado Libre y activala desde ahí.
+              Publicación creada. <b>{resultado.pausada ? "En pausa." : "Revisá su estado en Mercado Libre."}</b>
+              {resultado.envio_verificado
+                ? " Mercado Envíos sin Flex verificado."
+                : " Revisá el envío antes de activarla."}
             </div>
             {resultado.avisos?.length > 0 && (
               <ul className="list-disc rounded-lg bg-warn-bg px-5 py-2 text-[12px] text-warn">
@@ -1853,6 +1953,7 @@ interface RepubResp {
   nuevo_item_id: string;
   permalink: string | null;
   cerrada_vieja: boolean;
+  envio_verificado: boolean;
   avisos: string[];
 }
 
@@ -1994,6 +2095,7 @@ function CategoriaModal({
               {resultado.cerrada_vieja
                 ? " La vieja quedó cerrada."
                 : " Ojo: la vieja NO se pudo cerrar, hacelo a mano."}
+              {resultado.envio_verificado && " Mercado Envíos sin Flex verificado."}
             </div>
             {resultado.permalink && (
               <a

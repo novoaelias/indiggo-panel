@@ -1,285 +1,113 @@
-// Stock derivado + descuento de stock al despachar una venta.
+// Colchón publicado en ML + alta de alertas de stock manual heredadas.
+// Los movimientos físicos viven en las operaciones de inventario (Postgres).
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { mlFetch } from "./ml";
+import { calcBuffer, calcMinimo, ventasMulti } from "./bom";
 import {
-  calcBuffer,
-  calcMinimo,
-  esVariantePieza,
-  ventasMulti,
-} from "./bom";
+  armablesPorReceta,
+  disponibleComercial,
+  topeEleccion,
+} from "./inventory-logic";
 
 type DB = SupabaseClient<Database>;
 
-// Recalcula todo lo derivado:
-//  1. product_variants.stock_real de los holders = mín sobre el BOM (Elias carga
-//     las piezas, no el "vendible"). Las variantes "random/elección" se topean
-//     por el total de photocards del producto.
-//  2. product_variants.stock_ml (buffer publicado en ML) = calcBuffer(stock_real),
-//     para TODAS las variantes. El buffer nunca se edita a mano.
+// Recalcula lo único que sigue siendo derivado: `product_variants.stock_ml`, el
+// colchón que se publica en Mercado Libre. `stock_real` ya no se deriva de nada
+// (es la cantidad terminada y sólo la mueven las operaciones de inventario).
 export async function recalcularDerivado(db: DB) {
-  const { data: vc } = await db
-    .from("variant_components")
-    .select("variant_id, component_id, cantidad");
+  // El colchón es comercial, no físico: se calcula sobre lo que se puede
+  // entregar de esa variante = terminados libres de reservas + lo que se puede
+  // armar con las piezas que hay, menos lo ya comprometido en pedidos sin
+  // terminado. El reparto de piezas compartidas sin contarlas dos veces vive en
+  // las sugerencias de armado, no acá.
+  const [{ data: vars }, { data: recetas }, { data: piezas }, { data: reservas }, ventas] =
+    await Promise.all([
+      db
+        .from("product_variants")
+        .select("id, product_id, stock_real, stock_ml, stock_minimo, es_eleccion")
+        .eq("activo", true),
+      db.from("variant_components").select("variant_id, component_id, cantidad"),
+      db.from("components").select("id, stock_real"),
+      db
+        .from("inventory_reservations")
+        .select("product_variant_id, reserved_qty, missing_qty")
+        .eq("estado", "activa"),
+      ventasMulti(db, [7, 30]),
+    ]);
 
-  if (vc?.length) {
-    const { data: comps } = await db
-      .from("components")
-      .select("id, stock_real, origen");
-    const stockComp = new Map((comps ?? []).map((x) => [x.id, x.stock_real]));
-    const origenComp = new Map((comps ?? []).map((x) => [x.id, x.origen]));
-    const porVar = new Map<
-      string,
-      Array<{ component_id: string; cantidad: number }>
-    >();
-    for (const r of vc) {
-      if (!porVar.has(r.variant_id)) porVar.set(r.variant_id, []);
-      porVar.get(r.variant_id)!.push(r);
-    }
-    const { data: vars } = await db
-      .from("product_variants")
-      .select("id, stock_real, product_id")
-      .in("id", [...porVar.keys()]);
-    const { data: prods } = await db
-      .from("products")
-      .select("id, variantes_por_integrante");
-    const esHolderProd = new Map(
-      (prods ?? []).map((p) => [p.id, p.variantes_por_integrante]),
+  const stockPieza = new Map((piezas ?? []).map((p) => [p.id, p.stock_real]));
+  const recetaPorVariante = new Map<
+    string,
+    Array<{ component_id: string; cantidad: number }>
+  >();
+  for (const r of recetas ?? []) {
+    const lineas = recetaPorVariante.get(r.variant_id) ?? [];
+    lineas.push({ component_id: r.component_id, cantidad: r.cantidad });
+    recetaPorVariante.set(r.variant_id, lineas);
+  }
+  const reservadas = new Map<string, number>();
+  const faltantes = new Map<string, number>();
+  for (const r of reservas ?? []) {
+    reservadas.set(
+      r.product_variant_id,
+      (reservadas.get(r.product_variant_id) ?? 0) + r.reserved_qty,
     );
-
-    const pcCompsPorProd = new Map<string, Set<string>>();
-    for (const v of vars ?? []) {
-      for (const l of porVar.get(v.id) ?? []) {
-        if (origenComp.get(l.component_id) !== "imprenta") continue;
-        if (!pcCompsPorProd.has(v.product_id))
-          pcCompsPorProd.set(v.product_id, new Set());
-        pcCompsPorProd.get(v.product_id)!.add(l.component_id);
-      }
-    }
-    const totalPcPorProd = new Map<string, number>();
-    for (const [pid, set] of pcCompsPorProd) {
-      let s = 0;
-      for (const cid of set) s += stockComp.get(cid) ?? 0;
-      totalPcPorProd.set(pid, s);
-    }
-
-    for (const v of vars ?? []) {
-      const lines = porVar.get(v.id)!;
-      // "producto = pieza" (ej. llavero suelto): stock = el de la pieza, se
-      // carga una sola vez en la pieza.
-      if (!esHolderProd.get(v.product_id)) {
-        if (esVariantePieza(lines)) {
-          const real = stockComp.get(lines[0].component_id) ?? 0;
-          if (real !== v.stock_real)
-            await db
-              .from("product_variants")
-              .update({ stock_real: real })
-              .eq("id", v.id);
-        }
-        // los packs de mostacillas tienen BOM pero su stock (packs ya armados)
-        // lo lleva Elias a mano; el BOM sólo alimenta el planificador.
-        continue;
-      }
-      let real = Math.min(
-        ...lines.map((l) =>
-          Math.floor((stockComp.get(l.component_id) ?? 0) / (l.cantidad || 1)),
-        ),
-      );
-      const tienePc = lines.some(
-        (l) => origenComp.get(l.component_id) === "imprenta",
-      );
-      if (esHolderProd.get(v.product_id) && !tienePc)
-        real = Math.min(real, totalPcPorProd.get(v.product_id) ?? 0);
-      if (real !== v.stock_real)
-        await db
-          .from("product_variants")
-          .update({ stock_real: real })
-          .eq("id", v.id);
-    }
-  }
-
-  const [{ data: allVars }, { data: prodsPI }, ventas] = await Promise.all([
-    db
-      .from("product_variants")
-      .select(
-        "id, stock_real, stock_ml, stock_minimo, product_id, group_member_id, etiqueta, es_eleccion",
-      )
-      .eq("activo", true),
-    db.from("products").select("id, variantes_por_integrante"),
-    ventasMulti(db, [7, 30]),
-  ]);
-  const esHolder = new Map(
-    (prodsPI ?? []).map((p) => [p.id, p.variantes_por_integrante]),
-  );
-  const v7 = ventas.get(7)!;
-  const v30 = ventas.get(30)!;
-
-  const bomLinesVar = new Map<string, Array<{ component_id: string; cantidad: number }>>();
-  for (const r of vc ?? []) {
-    if (!bomLinesVar.has(r.variant_id)) bomLinesVar.set(r.variant_id, []);
-    bomLinesVar.get(r.variant_id)!.push(r);
-  }
-  // "producto = pieza": su stock/mínimo lo lleva la pieza, no la variante.
-  const esPieza = (vid: string, pid: string) =>
-    !esHolder.get(pid) && esVariantePieza(bomLinesVar.get(vid));
-
-  // "Qué se puede vender" de las variantes reales (no elección) de cada producto
-  // simple → de ahí sale el stock que se le muestra a la variante "Random".
-  const realPorProd = new Map<string, number>();
-  for (const v of allVars ?? []) {
-    if (v.es_eleccion || esHolder.get(v.product_id)) continue;
-    realPorProd.set(
-      v.product_id,
-      (realPorProd.get(v.product_id) ?? 0) + Math.max(0, v.stock_real),
+    faltantes.set(
+      r.product_variant_id,
+      (faltantes.get(r.product_variant_id) ?? 0) + (r.missing_qty ?? 0),
     );
   }
 
-  const minimoVar = new Map<string, number>();
-  for (const v of allVars ?? []) {
-    const patch: Record<string, number> = {};
-
-    // stock_real de la variante "Random" de un producto simple = suma de las
-    // reales (no se edita a mano; los holders siguen su propio camino).
-    const realEfectivo =
-      v.es_eleccion && !esHolder.get(v.product_id)
-        ? (realPorProd.get(v.product_id) ?? 0)
-        : v.stock_real;
-    if (v.es_eleccion && !esHolder.get(v.product_id) && realEfectivo !== v.stock_real)
-      patch.stock_real = realEfectivo;
-
-    // mínimo automático por ventas (las de elección no tienen mínimo propio).
-    if (!v.es_eleccion) {
+  // Mínimo sugerido por ventas: ordena qué conviene reponer primero. Es una
+  // señal comercial, no una cantidad física: no toca terminados ni piezas.
+  const v7 = ventas.get(7);
+  const v30 = ventas.get(30);
+  if (v7 && v30)
+    for (const v of vars ?? []) {
+      if (v.es_eleccion) continue;
       const min = calcMinimo(
         v7.porVariante.get(v.id) ?? 0,
         v30.porVariante.get(v.id) ?? 0,
         v30.porProducto.get(v.product_id) ?? 0,
       );
-      minimoVar.set(v.id, min);
-      // Se persiste sólo en variantes de productos simples "de verdad". En
-      // holders y en "producto = pieza" el mínimo lo lleva la pieza (ver abajo).
-      if (
-        !esHolder.get(v.product_id) &&
-        !esPieza(v.id, v.product_id) &&
-        min !== v.stock_minimo
-      )
-        patch.stock_minimo = min;
+      if (min !== v.stock_minimo)
+        await db
+          .from("product_variants")
+          .update({ stock_minimo: min })
+          .eq("id", v.id);
     }
 
-    // buffer publicado en ML
-    const buf = calcBuffer(realEfectivo);
-    if (buf !== v.stock_ml) patch.stock_ml = buf;
-
-    if (Object.keys(patch).length)
-      await db
-        .from("product_variants")
-        .update(patch as Database["public"]["Tables"]["product_variants"]["Update"])
-        .eq("id", v.id);
+  const variantesPorProducto = new Map<string, typeof vars>();
+  for (const v of vars ?? []) {
+    const arr = variantesPorProducto.get(v.product_id) ?? [];
+    arr.push(v);
+    variantesPorProducto.set(v.product_id, arr);
   }
 
-  // mínimo de las piezas (cuerpos / llaveros / photocards) = demanda mínima que
-  // arrastran las variantes que las consumen SIN armado (holders + "producto =
-  // pieza"). Las piezas de packs (logos, letras, nombres) NO llevan mínimo:
-  // Elias las imprime por pedido — el planificador ya calcula cuánto hace falta.
-  const prodDeVar = new Map((allVars ?? []).map((v) => [v.id, v.product_id]));
-  const arrastraMinimo = (vid: string) => {
-    const pid = prodDeVar.get(vid);
-    return !!pid && (esHolder.get(pid) || esPieza(vid, pid));
-  };
-  const { data: compsMin } = await db
-    .from("components")
-    .select("id, stock_minimo");
-  const minimoComp = new Map<string, number>();
-  for (const r of vc ?? []) {
-    if (!arrastraMinimo(r.variant_id)) continue;
-    const add = (minimoVar.get(r.variant_id) ?? 0) * (r.cantidad || 1);
-    if (add) minimoComp.set(r.component_id, (minimoComp.get(r.component_id) ?? 0) + add);
-  }
-  for (const comp of compsMin ?? []) {
-    const min = minimoComp.get(comp.id) ?? 0;
-    if (min !== comp.stock_minimo)
-      await db.from("components").update({ stock_minimo: min }).eq("id", comp.id);
+  for (const v of vars ?? []) {
+    const receta = recetaPorVariante.get(v.id) ?? [];
+    let armables = armablesPorReceta(receta, stockPieza);
+    if (v.es_eleccion && receta.length) {
+      const hermanas = (variantesPorProducto.get(v.product_id) ?? [])
+        .filter((x) => x.id !== v.id && !x.es_eleccion)
+        .map((x) => recetaPorVariante.get(x.id) ?? []);
+      const tope = topeEleccion(receta, hermanas, stockPieza);
+      if (tope != null) armables = Math.min(armables, tope);
+    }
+    const disponible = disponibleComercial({
+      terminados: v.stock_real,
+      reservados: reservadas.get(v.id) ?? 0,
+      armables,
+      faltantes: faltantes.get(v.id) ?? 0,
+    });
+    const buffer = calcBuffer(disponible);
+    if (buffer !== v.stock_ml)
+      await db.from("product_variants").update({ stock_ml: buffer }).eq("id", v.id);
   }
 }
 
-// ---------- descuento de stock al despachar / restaurar al cancelar ----------
-
-interface ItemPedido {
-  id: string;
-  ml_item_id: string | null;
-  ml_variation_id: string | null;
-  titulo: string | null;
-  cantidad: number;
-  product_variant_id: string | null;
-}
-
-/** Resuelve la variante de catálogo de un ítem de pedido. */
-async function resolverVariante(
-  db: DB,
-  it: ItemPedido,
-): Promise<string | null> {
-  if (it.product_variant_id) return it.product_variant_id;
-  if (!it.ml_item_id) return null;
-
-  const { data: listing } = await db
-    .from("ml_listings")
-    .select("id, product_id")
-    .eq("ml_item_id", it.ml_item_id)
-    .maybeSingle();
-  if (!listing) return null;
-
-  if (it.ml_variation_id) {
-    const { data: lv } = await db
-      .from("ml_listing_variations")
-      .select("product_variant_id")
-      .eq("ml_listing_id", listing.id)
-      .eq("ml_variation_id", it.ml_variation_id)
-      .maybeSingle();
-    if (lv?.product_variant_id) return lv.product_variant_id;
-  }
-
-  // sin variación: variante única del producto ("Único" si existe)
-  if (!listing.product_id) return null;
-  const { data: vars } = await db
-    .from("product_variants")
-    .select("id, etiqueta, es_eleccion")
-    .eq("product_id", listing.product_id)
-    .eq("activo", true);
-  if (!vars?.length) return null;
-  if (vars.length === 1) return vars[0].id;
-  const unico = vars.find((v) => v.etiqueta === "Único");
-  if (unico) return unico.id;
-  const noEleccion = vars.filter((v) => !v.es_eleccion);
-  return noEleccion.length === 1 ? noEleccion[0].id : null;
-}
-
-async function sumarStockVariante(db: DB, variantId: string, delta: number) {
-  const { data: v } = await db
-    .from("product_variants")
-    .select("stock_real")
-    .eq("id", variantId)
-    .maybeSingle();
-  if (!v) return { antes: 0, despues: 0 };
-  const despues = Math.max(0, v.stock_real + delta);
-  await db
-    .from("product_variants")
-    .update({ stock_real: despues })
-    .eq("id", variantId);
-  return { antes: v.stock_real, despues };
-}
-
-async function sumarStockComponente(db: DB, componentId: string, delta: number) {
-  const { data: c } = await db
-    .from("components")
-    .select("stock_real")
-    .eq("id", componentId)
-    .maybeSingle();
-  if (!c) return;
-  await db
-    .from("components")
-    .update({ stock_real: Math.max(0, c.stock_real + delta) })
-    .eq("id", componentId);
-}
 
 /** Para poder verificar más tarde si un aviso de stock manual ya se corrigió:
  *  qué variante quedó mal y en qué valor quedó (`trasIncidente`) — si ahora
@@ -289,137 +117,6 @@ export interface ChequeoStock {
   trasIncidente: number;
 }
 
-export interface ResultadoDescuento {
-  aplicados: number;
-  avisos: string[];
-  chequeos: ChequeoStock[];
-}
-
-/**
- * Ajusta el stock por un pedido: `signo = -1` descuenta (al despachar),
- * `signo = +1` devuelve (al cancelar). No toca Full (ML tiene ese stock).
- * Las ventas Random / sin mapear no se tocan: se devuelven como `avisos`.
- */
-export async function ajustarStockPorPedido(
-  db: DB,
-  orderId: string,
-  signo: -1 | 1,
-): Promise<ResultadoDescuento> {
-  const { data: items } = await db
-    .from("ml_order_items")
-    .select(
-      "id, ml_item_id, ml_variation_id, titulo, cantidad, product_variant_id",
-    )
-    .eq("ml_order_id", orderId);
-
-  const avisos: string[] = [];
-  const chequeos: ChequeoStock[] = [];
-  let aplicados = 0;
-
-  for (const it of (items ?? []) as ItemPedido[]) {
-    const qty = it.cantidad || 1;
-    const variantId = await resolverVariante(db, it);
-    if (!variantId) {
-      avisos.push(`No pude identificar el producto de "${it.titulo ?? "?"}"`);
-      continue;
-    }
-    if (!it.product_variant_id)
-      await db
-        .from("ml_order_items")
-        .update({ product_variant_id: variantId })
-        .eq("id", it.id);
-
-    const { data: v } = await db
-      .from("product_variants")
-      .select("id, etiqueta, es_eleccion, product_id, products(nombre, variantes_por_integrante)")
-      .eq("id", variantId)
-      .maybeSingle();
-    if (!v) {
-      avisos.push(`No encontré la variante de "${it.titulo ?? "?"}"`);
-      continue;
-    }
-    const prod = v.products as
-      | { nombre?: string; variantes_por_integrante?: boolean }
-      | null;
-    const nombre = `${prod?.nombre ?? it.titulo ?? "?"}${v.etiqueta && v.etiqueta !== "Único" ? ` (${v.etiqueta})` : ""}`;
-
-    if (v.es_eleccion) {
-      avisos.push(
-        `Venta "a elección" de ${nombre}: descontá a mano el que hayas mandado`,
-      );
-      continue;
-    }
-
-    const { data: lines } = await db
-      .from("variant_components")
-      .select("component_id, cantidad")
-      .eq("variant_id", variantId);
-
-    if (prod?.variantes_por_integrante) {
-      if (!lines?.length) {
-        avisos.push(`${nombre}: no tiene lista de materiales, descontá a mano`);
-        continue;
-      }
-      for (const l of lines)
-        await sumarStockComponente(
-          db,
-          l.component_id,
-          signo * (l.cantidad || 1) * qty,
-        );
-      aplicados++;
-      continue;
-    }
-
-    // "producto = pieza" (llavero suelto): el stock lo lleva la pieza
-    if (lines && esVariantePieza(lines)) {
-      await sumarStockComponente(db, lines[0].component_id, signo * qty);
-      aplicados++;
-      continue;
-    }
-
-    // variante simple / pack: se descuenta su propio stock_real
-    const { antes, despues } = await sumarStockVariante(db, variantId, signo * qty);
-    if (signo < 0 && antes < qty) {
-      avisos.push(
-        `${nombre}: la venta dice ${qty} y figuraba ${antes} — quedó en ${despues}`,
-      );
-      chequeos.push({ variantId, trasIncidente: despues });
-    }
-    aplicados++;
-  }
-
-  return { aplicados, avisos, chequeos };
-}
-
-/** Deja un aviso en Inicio para que Elias ajuste stock a mano por un pedido.
- *  `chequeos` (si hay) queda guardado en la alerta para poder verificar más
- *  tarde, con datos reales, si ya se corrigió — ver resolverAlertaManual. */
-export async function avisarStockManual(
-  db: DB,
-  orderId: string,
-  comprador: string | null,
-  avisos: string[],
-  chequeos: ChequeoStock[] = [],
-) {
-  if (!avisos.length) return;
-  await db
-    .from("alerts")
-    .delete()
-    .eq("tipo", "venta_stock_manual")
-    .eq("entidad_id", orderId)
-    .is("resuelta_at", null);
-  await db.from("alerts").insert({
-    tipo: "venta_stock_manual",
-    severidad: "warn",
-    titulo: `Ajustá stock a mano por la venta de ${comprador ?? "un comprador"}`,
-    detalle: avisos.slice(0, 3).join(" · "),
-    meta: chequeos.length
-      ? ({ chequeos } as unknown as Database["public"]["Tables"]["alerts"]["Insert"]["meta"])
-      : null,
-    entidad_tipo: "ml_order",
-    entidad_id: orderId,
-  } as Database["public"]["Tables"]["alerts"]["Insert"]);
-}
 
 export interface ResultadoResolverAlerta {
   resuelta: boolean;
@@ -504,7 +201,9 @@ export async function publicadoEnML(db: DB) {
       .select("ml_listing_id, product_variant_id, cantidad_ml"),
     db
       .from("ml_listings")
-      .select("id, product_id, cantidad_ml, tiene_variantes, estado"),
+      .select(
+        "id, product_id, product_variant_id, cantidad_ml, tiene_variantes, estado",
+      ),
   ]);
   const activas = new Set(
     (mls ?? []).filter((m) => m.estado === "active").map((m) => m.id),
@@ -518,7 +217,16 @@ export async function publicadoEnML(db: DB) {
   }
   const porProd = new Map<string, number[]>();
   for (const m of mls ?? []) {
-    if (!m.product_id || m.tiene_variantes || m.estado !== "active") continue;
+    if (m.tiene_variantes || m.estado !== "active") continue;
+    // Una publicación simple ya ligada a su variante se compara contra esa
+    // variante: dentro de un producto puede haber un color por publicación.
+    if (m.product_variant_id) {
+      const arr = porVar.get(m.product_variant_id) ?? [];
+      arr.push(m.cantidad_ml ?? 0);
+      porVar.set(m.product_variant_id, arr);
+      continue;
+    }
+    if (!m.product_id) continue;
     const arr = porProd.get(m.product_id) ?? [];
     arr.push(m.cantidad_ml ?? 0);
     porProd.set(m.product_id, arr);
@@ -532,37 +240,152 @@ export async function publicadoEnML(db: DB) {
 async function resolverMLTodas(
   db: DB,
   variantId: string,
-): Promise<Array<{ itemId: string; variationId: string | null }>> {
+): Promise<Array<{ itemId: string; variationId: string | null; userProductId: string | null }>> {
   const { data: mlvs } = await db
     .from("ml_listing_variations")
-    .select("ml_variation_id, ml_listings(ml_item_id, estado)")
+    .select("ml_variation_id, ml_listings(ml_item_id, estado, raw)")
     .eq("product_variant_id", variantId);
 
   const refs = (mlvs ?? [])
     .map((v) => {
       const l = v.ml_listings as
-        | { ml_item_id?: string; estado?: string }
+        | { ml_item_id?: string; estado?: string; raw?: unknown }
         | null;
+      const raw = (l?.raw && typeof l.raw === "object" ? l.raw : {}) as {
+        user_product_id?: unknown;
+        inventory_id?: unknown;
+      };
+      const userProductId = raw.user_product_id ?? raw.inventory_id;
       return l?.ml_item_id && l.estado === "active"
-        ? { itemId: l.ml_item_id, variationId: v.ml_variation_id }
+        ? {
+            itemId: l.ml_item_id,
+            variationId: v.ml_variation_id,
+            userProductId: userProductId ? String(userProductId) : null,
+          }
         : null;
     })
-    .filter((x): x is { itemId: string; variationId: string } => x != null);
+    .filter((x): x is { itemId: string; variationId: string; userProductId: string | null } => x != null);
   if (refs.length) return refs;
 
-  // sin variaciones: publicación(es) activas sin variantes a nivel item
-  const { data: pv } = await db
-    .from("product_variants")
-    .select("product_id")
-    .eq("id", variantId)
-    .single();
-  if (!pv) return [];
-  const { data: mls } = await db
+  // Publicaciones sin variaciones ligadas a ESTA variante. Un producto puede
+  // tener una publicación por color (el pack de 110 en rojo, negro y lila), así
+  // que empujar por producto haría que un color pisara el stock del otro.
+  const { data: propias } = await db
     .from("ml_listings")
-    .select("ml_item_id")
-    .eq("product_id", pv.product_id)
+    .select("ml_item_id,raw")
+    .eq("product_variant_id", variantId)
     .eq("estado", "active");
-  return (mls ?? []).map((m) => ({ itemId: m.ml_item_id, variationId: null }));
+
+  let mls = propias ?? [];
+  if (!mls.length) {
+    // Compatibilidad: publicaciones del producto que todavía no tienen variante
+    // asignada (recién sincronizadas, antes de derivar el catálogo).
+    const { data: pv } = await db
+      .from("product_variants")
+      .select("product_id")
+      .eq("id", variantId)
+      .single();
+    if (!pv) return [];
+    const { data: sueltas } = await db
+      .from("ml_listings")
+      .select("ml_item_id,raw")
+      .eq("product_id", pv.product_id)
+      .eq("estado", "active")
+      .is("product_variant_id", null);
+    mls = sueltas ?? [];
+  }
+  return mls.map((m) => {
+    const raw = (m.raw && typeof m.raw === "object" ? m.raw : {}) as {
+      user_product_id?: unknown;
+      inventory_id?: unknown;
+    };
+    const userProductId = raw.user_product_id ?? raw.inventory_id;
+    return {
+      itemId: m.ml_item_id,
+      variationId: null,
+      userProductId: userProductId ? String(userProductId) : null,
+    };
+  });
+}
+
+interface StockLocation {
+  type: "seller_warehouse" | "selling_address" | "meli_facility" | string;
+  store_id?: string | number;
+  network_node_id?: string | number;
+  quantity?: number;
+}
+
+export function distribuirStock(total: number, locations: StockLocation[]): StockLocation[] {
+  if (!locations.length) return [];
+  const actual = locations.reduce((sum, location) => sum + Math.max(0, Number(location.quantity || 0)), 0);
+  let asignado = 0;
+  return locations.map((location, index) => {
+    const quantity =
+      index === locations.length - 1
+        ? Math.max(0, total - asignado)
+        : actual > 0
+          ? Math.floor((Math.max(0, Number(location.quantity || 0)) / actual) * total)
+          : index === 0
+            ? total
+            : 0;
+    asignado += quantity;
+    return {
+      store_id: location.store_id,
+      network_node_id: location.network_node_id,
+      quantity,
+      type: location.type,
+    };
+  });
+}
+
+async function actualizarStockUserProduct(
+  env: Env,
+  db: DB,
+  userProductId: string,
+  cantidad: number,
+): Promise<{ handled: boolean; ok: boolean; error?: string }> {
+  for (let intento = 0; intento < 2; intento++) {
+    const current = await mlFetch(env, db, `/user-products/${userProductId}/stock`);
+    if (!current.ok) return { handled: false, ok: false };
+    const version = current.headers.get("x-version");
+    const body = (await current.json()) as { locations?: StockLocation[] };
+    const locations = body.locations ?? [];
+    const warehouses = locations.filter((location) => location.type === "seller_warehouse");
+    const sellingAddress = locations.find((location) => location.type === "selling_address");
+    if (!version) return { handled: true, ok: false, error: "Mercado Libre no informó x-version" };
+
+    const tipo = warehouses.length ? "seller_warehouse" : sellingAddress ? "selling_address" : null;
+    if (!tipo)
+      return {
+        handled: true,
+        ok: false,
+        error: "el User Product sólo tiene stock administrado por Mercado Libre",
+      };
+    const payload =
+      tipo === "seller_warehouse"
+        ? {
+            locations: distribuirStock(cantidad, warehouses).map(({ store_id, network_node_id, quantity }) => ({
+              store_id,
+              network_node_id,
+              quantity,
+            })),
+          }
+        : { quantity: cantidad };
+    const update = await mlFetch(
+      env,
+      db,
+      `/user-products/${userProductId}/stock/type/${tipo}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-version": version },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (update.ok) return { handled: true, ok: true };
+    if (update.status === 409 && intento === 0) continue;
+    return { handled: true, ok: false, error: (await update.text()).slice(0, 120) };
+  }
+  return { handled: true, ok: false, error: "conflicto de versión al actualizar stock" };
 }
 
 export interface ResultadoSincronizacionML {
@@ -607,12 +430,33 @@ export async function sincronizarStockML(
   let ok = 0;
   const errores: string[] = [];
   const itemsTocados = new Set<string>();
+  const userProductsEnCurso = new Map<
+    string,
+    Promise<{ handled: boolean; ok: boolean; error?: string }>
+  >();
 
   const empujar = async (v: { id: string; stock_ml: number }) => {
     const refs = await resolverMLTodas(db, v.id);
     if (!refs.length) return;
     let algunoOk = false;
     for (const ref of refs) {
+      if (ref.userProductId) {
+        let promesa = userProductsEnCurso.get(ref.userProductId);
+        if (!promesa) {
+          promesa = actualizarStockUserProduct(env, db, ref.userProductId, v.stock_ml);
+          userProductsEnCurso.set(ref.userProductId, promesa);
+        }
+        const up = await promesa;
+        if (up.handled) {
+          if (up.ok) {
+            algunoOk = true;
+            itemsTocados.add(ref.itemId);
+          } else {
+            errores.push(`${ref.userProductId}: ${up.error ?? "no se pudo actualizar"}`);
+          }
+          continue;
+        }
+      }
       const path = ref.variationId
         ? `/items/${ref.itemId}/variations/${ref.variationId}`
         : `/items/${ref.itemId}`;

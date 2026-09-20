@@ -10,7 +10,7 @@
 //
 // No toca stock_real ni stock_minimo de filas que ya existían (los edita Elias).
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/lib/database.types";
+import type { Database, Json } from "@/lib/database.types";
 
 type DB = SupabaseClient<Database>;
 
@@ -64,7 +64,13 @@ type Listing = {
   tiene_variantes: boolean;
   cantidad_ml: number | null;
   grupo_id: string | null;
+  raw: Json | null;
 };
+
+function atributoListing(l: Listing, id: string): string | null {
+  const raw = l.raw as { attributes?: Array<{ id?: string; value_name?: string }> } | null;
+  return raw?.attributes?.find((a) => a.id === id)?.value_name?.trim() || null;
+}
 
 export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
   const [
@@ -77,7 +83,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
     db
       .from("ml_listings")
       .select(
-        "id, ml_item_id, titulo, tiene_variantes, cantidad_ml, grupo_id",
+        "id, ml_item_id, titulo, tiene_variantes, cantidad_ml, grupo_id, raw",
       ),
     db
       .from("ml_listing_variations")
@@ -114,6 +120,17 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
   for (const l of (listings ?? []) as Listing[]) {
     if (l.grupo_id && grupoInfo.has(l.grupo_id))
       grupoInfo.get(l.grupo_id)!.miembros.push(l);
+  }
+
+  // Un grupo se abre en variantes por color sólo si sus publicaciones mezclan
+  // colores (el pack de 110 viene rojo, negro y lila). Si todas comparten color,
+  // el producto sigue teniendo una sola variante "Único".
+  const gruposMulticolor = new Set<string>();
+  for (const [gid, gi] of grupoInfo) {
+    const colores = new Set(
+      gi.miembros.map((m) => atributoListing(m, "COLOR") ?? "Sin color"),
+    );
+    if (colores.size > 1) gruposMulticolor.add(gid);
   }
 
   // Publicación cuyo ml_item_id es el sku_base del producto de esta publicación.
@@ -176,7 +193,7 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
   // --- productos existentes ---
   const { data: prodExist } = await db
     .from("products")
-    .select("id, sku_base");
+    .select("id, sku_base, catalog_locked");
   const prodBySku = new Map(
     (prodExist ?? [])
       .filter((p) => p.sku_base)
@@ -193,6 +210,8 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
       category_id: d.category_id,
       group_id: d.group_id,
       variantes_por_integrante: d.variantes_por_integrante,
+      nombre_interno: d.nombre,
+      catalog_locked: false,
     });
   }
   if (nuevosProd.length) {
@@ -209,7 +228,8 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
   // --- refrescar atributos ML en productos existentes (no toca stock) ---
   for (const d of derivados.values()) {
     const pid = prodBySku.get(d.sku_base);
-    if (pid)
+    const locked = prodExist?.find((p) => p.id === pid)?.catalog_locked ?? false;
+    if (pid && !locked)
       await db
         .from("products")
         .update({
@@ -220,6 +240,8 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
           activo: true,
         })
         .eq("id", pid);
+    else if (pid)
+      await db.from("products").update({ activo: true }).eq("id", pid);
   }
 
   // --- vincular ml_listings.product_id (todas las del grupo → producto canónico) ---
@@ -345,14 +367,20 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
     if (!d.tiene_variantes || lvars.length === 0) {
       // producto simple: 1 variante "Único" (sólo si el producto no es de variantes)
       if (d.tiene_variantes) continue;
-      const sku = base.ml_item_id;
+      const color =
+        l.grupo_id && gruposMulticolor.has(l.grupo_id)
+          ? (atributoListing(l, "COLOR") ?? "Sin color")
+          : null;
+      const sku = color
+        ? `${base.ml_item_id}#COLOR:${norm(color)}`
+        : base.ml_item_id;
       marcarSku(pid, sku);
       linkListingSku.set(l.id, sku);
       if (!deseadas.has(sku))
         deseadas.set(sku, {
           product_id: pid,
           sku,
-          etiqueta: "Único",
+          etiqueta: color ?? "Único",
           group_member_id: null,
           es_eleccion: false,
           stock_ml_seed: l.cantidad_ml ?? 0,
@@ -462,6 +490,17 @@ export async function derivarCatalogo(db: DB): Promise<DerivarResumen> {
         .from("ml_listing_variations")
         .update({ product_variant_id: vid })
         .eq("id", vId);
+  }
+
+  // Las publicaciones sin variaciones también apuntan a su variante interna.
+  // Así un pedido se puede reservar sin volver a inferirlo por el título.
+  for (const [listingId, sku] of linkListingSku) {
+    const vid = idPorSku.get(sku);
+    if (vid)
+      await db
+        .from("ml_listings")
+        .update({ product_variant_id: vid })
+        .eq("id", listingId);
   }
 
   return resumen;

@@ -27,11 +27,11 @@ const PLACA: Record<string, { rinde: number; minutos: number }> = {
   "Cuerpo · Holder Straykids": { rinde: 3, minutos: 135 },
   "Llavero · Holder Arirang": { rinde: 23, minutos: 540 },
   "Llavero · Holder Straykids": { rinde: 17, minutos: 250 },
-  "Logo arirang triple": { rinde: 94, minutos: 495 },
-  "Logo arirang triple negro": { rinde: 94, minutos: 495 },
-  "Logo arirang suelto": { rinde: 64, minutos: 430 },
-  "Set nombres BTS": { rinde: 13, minutos: 550 },
-  "Letras BTS": { rinde: 85, minutos: 570 },
+  "Logo Arirang completo": { rinde: 94, minutos: 495 },
+  "Logo Arirang completo negro": { rinde: 94, minutos: 495 },
+  "Juego de logo Arirang desglosado": { rinde: 64, minutos: 430 },
+  "Juego de nombres BTS": { rinde: 13, minutos: 550 },
+  "Juego BTS": { rinde: 85, minutos: 570 },
 };
 
 // ---------- rinde/tiempo por placa de productos 3D que se imprimen DIRECTO ----------
@@ -65,24 +65,24 @@ const RECETAS_SIMPLES: Record<
   LineaReceta[] | Record<string, LineaReceta[]>
 > = {
   "Pack 100 Mostacillas Mixtas Arirang - Especial Pulseras Rojo": [
-    { comp: "Logo arirang triple", cantidad: 38 },
-    { comp: "Logo arirang suelto", cantidad: 6 },
-    { comp: "Set nombres BTS", cantidad: 2 },
+    { comp: "Logo Arirang completo", cantidad: 38 },
+    { comp: "Juego de logo Arirang desglosado", cantidad: 6 },
+    { comp: "Juego de nombres BTS", cantidad: 2 },
   ],
   "Pack 50 Mostacillas Surtidas Insumos Freebies Bts Arirang Rojo": [
-    { comp: "Logo arirang triple", cantidad: 19 },
-    { comp: "Logo arirang suelto", cantidad: 3 },
-    { comp: "Set nombres BTS", cantidad: 1 },
+    { comp: "Logo Arirang completo", cantidad: 19 },
+    { comp: "Juego de logo Arirang desglosado", cantidad: 3 },
+    { comp: "Juego de nombres BTS", cantidad: 1 },
   ],
   "Pack 50 Mostacillas Logo Arirang Bts - Especial Freebies": {
-    Rojo: [{ comp: "Logo arirang triple", cantidad: 50 }],
-    Negro: [{ comp: "Logo arirang triple negro", cantidad: 50 }],
+    Rojo: [{ comp: "Logo Arirang completo", cantidad: 50 }],
+    Negro: [{ comp: "Logo Arirang completo negro", cantidad: 50 }],
   },
   "Mostacillas integrantes bts 110": [
-    { comp: "Set nombres BTS", cantidad: 5 },
+    { comp: "Juego de nombres BTS", cantidad: 5 },
   ],
   "Pack 30 Letras  Bts  - Insumos Para Freebies": [
-    { comp: "Letras BTS", cantidad: 10 },
+    { comp: "Juego BTS", cantidad: 10 },
   ],
   // llavero suelto = 1 llavero del holder Arirang (la misma pieza / el mismo stock)
   "Llavero Exclusivo Bts - Logo Nuevo Álbum - Accesorio Arirang Rojo": [

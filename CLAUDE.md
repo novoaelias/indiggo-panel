@@ -16,12 +16,16 @@ npm run dev        # Vite + @cloudflare/vite-plugin: SPA (HMR) + the real Worker
                    # workerd + cron, all on http://localhost:5173
 npx tsc -b         # typecheck only (fast). 3 project refs: app / node / worker
 npm run build      # wrangler types && tsc -b && vite build  ->  dist/
+npm test           # vitest: inventario, concurrencia, preguntas, contrato de migraciones
 npm run deploy     # build + wrangler deploy
 npm run db:types   # regenerate src/lib/database.types.ts from the REMOTE Supabase schema
 ```
 
-- **No test suite and no linter.** `tsc -b` is the only gate; it runs with `noUnusedLocals` /
-  `noUnusedParameters`, so an unused import or var fails the build.
+- **Gates: `tsc -b` + `npm test`.** No linter. `tsc -b` runs with `noUnusedLocals` /
+  `noUnusedParameters`, so an unused import or var fails the build. `tests/` covers the rules
+  that must not regress: a shared piece is never counted twice, the commercial buffer stays
+  separate from physical stock, movements are idempotent, and an already dispatched order
+  never reserves stock again.
 - Local secrets live in `.dev.vars` (git-ignored; copy from `.env.example`). Production secrets:
   `npx wrangler secret bulk .dev.vars` (or `wrangler secret put NAME`). `SHEETS_ID` is the only
   non-secret var, in `wrangler.jsonc`.
@@ -51,27 +55,52 @@ other path serves the SPA. Entry point `worker/index.ts` = `fetch` (Hono app, `w
    - `worker/lib/derivar.ts` `derivarCatalogo` — collapses the several `ml_listings` that are the
      same physical product (installment-plan dupes, reworded titles) into one `product` via
      `listing_groups` + a canonical listing; matches variants by kpop group member.
-   - `worker/lib/bom.ts` `derivarBOM` — builds the bill of materials: a holder unit = 3D body +
-     holder-specific 3D keychain + print-shop photocard; mostacilla/letter packs have fixed
-     recipes; other simple products have no BOM. Also holds per-print-plate yields/times for the
-     production planner.
+   - **Recipes live in the DB** (`variant_components`), edited from Inventario and written only
+     through `inventory_set_recipe`. `worker/lib/bom.ts` `derivarBOM` is the old code-driven
+     builder: it is no longer called by anything, keep it that way. `bom.ts` still owns the
+     per-print-plate yields/times and the planner helpers that Stock/Metricas use.
+   - Pieces are counted per color and per unit (`components.codigo` / `unidad` / `equivalencia`):
+     a "Juego BTS" is B + T + S, a "Juego de nombres BTS" is the 22 letters of the seven names.
    - These are **idempotent** and must **not** overwrite `stock_real` / `stock_minimo` on rows
      that already exist — those are the owner's manual input.
 
-3. **Computed fields** — `worker/lib/stock.ts` `recalcularDerivado` (also run every sync):
-   `stock_ml` (the inflated buffer published to ML so listings never auto-pause on stock-out),
-   automatic `stock_minimo` from sales velocity, and holders' sellable `stock_real` rolled up
-   from component stock. `es_eleccion` "random / a elección" variants carry no stock/production;
-   their numbers are derived from the product's real variants.
+3. **Physical inventory and the commercial buffer** (inventory v2). `product_variants.stock_real`
+   is now *finished units only*: nothing derives it any more, it changes only through the
+   transactional operations in `supabase/migrations/0023_inventory_core.sql`
+   (`inventory_adjust`, `inventory_register_print`, `inventory_assemble`, `inventory_reserve_order`,
+   `inventory_fulfill_order`, `inventory_return_order`), each one idempotent by
+   `inventory_operations.idempotency_key` and writing its lines to `inventory_movement_lines`.
+   Those functions are `SECURITY DEFINER` and executable by `service_role` only: call them from
+   the Worker, never from the browser. Opening a screen never writes quantities.
+   `worker/lib/stock.ts` `recalcularDerivado` only recomputes `stock_ml`, the buffer published to
+   ML: `calcBuffer(disponibleComercial(...))` = 2 when there is nothing available, otherwise
+   available + 3, where available = free finished units + what the pieces allow assembling
+   (`armablesPorReceta`) minus what orders already committed. An `es_eleccion` variant (Random /
+   "a elección") is additionally capped by `topeEleccion`: its recipe lacks the piece that varies
+   (the photocard), so it can never publish more than the stock of those pieces across the
+   product's real variants. `allocateAssemblySuggestions` (`worker/lib/inventory-logic.ts`) is the
+   honest build plan: it hands out shared pieces once, and `planPiezas` turns what is missing into
+   print jobs (rounded to plate fractions) and print-shop orders.
 
-### Sale → stock discount
+### Sale → reservation → dispatch
 
-At dispatch (`shipment` → `shipped`/`delivered`, non-`fulfillment`), `descontarPorDespacho` →
-`ajustarStockPorPedido(db, orderId, -1)` decrements stock once per order, guarded by
-`ml_orders.stock_descontado_at`. Cancellation restores it. The guard uses an **atomic claim**
-(`UPDATE ... WHERE <marker> IS NULL RETURNING id`) because ML fires several notifications per
-sale and the cron runs in parallel — a plain check-then-write double-counts. The same pattern
+A paid order reserves finished units (`inventory_reserve_order`, from `upsertOrder`); what it
+cannot cover shows up as `inventory_reservations.missing_qty`, which is what Pedidos and
+Produccion read as "hay que armar". ML leaves an order in `paid` forever, so both the SQL
+function and `upsertOrder` refuse to reserve when `ml_orders.stock_descontado_at` is set:
+without that, every resync would reserve old sales again and free stock would collapse to zero.
+
+At dispatch (`shipment` → `shipped`/`delivered`, non-`fulfillment`), `descontarPorDespacho` calls
+`inventory_fulfill_order`, which consumes the reservation, discounts finished units and, for
+whatever is missing, assembles from pieces inside the same transaction. The once-per-order guard
+is still the **atomic claim** on `ml_orders.stock_descontado_at`
+(`UPDATE ... WHERE <marker> IS NULL RETURNING id`), because ML fires several notifications per
+sale and the cron runs in parallel: a plain check-then-write double-counts. The same pattern
 guards the (currently suspended) Flex sheet write via `ml_orders.sheet_synced_at`.
+
+A cancellation before dispatch only releases the reservation (`inventory_release_order`). If the
+order already shipped, stock comes back only by registering the physical return
+(`inventory_return_order`, from Inventario).
 
 ### AI is always propose-then-confirm
 
@@ -97,6 +126,19 @@ only on explicit confirmation in the UI, applies it to MercadoLibre. New listing
   DB types from `src/lib/database.types.ts`.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.
+- **Questions** (`worker/lib/questions.ts`): ML notifies topic `questions`, and the hourly cron
+  reconciles (`/questions/search`) so a lost event is recovered. A question is answered
+  automatically only with enough evidence (similar previous answers or verified
+  `business_facts`, edited in Configuración → Reglas comerciales; a `temporal` rule expires after
+  24 h), no contradictions and no risky wording (delivery, price, pickup, availability
+  and the like go to the owner). A buyer's text is untrusted content: it can never change the
+  assistant's instructions. Before answering, ML is re-checked so an already answered question is
+  not answered twice.
+- **Web Push** (`worker/lib/push.ts`, `public/sw.js`, `src/lib/push.ts`): VAPID keys in
+  `VAPID_SERVER_PUBLIC_KEY` / `VAPID_SERVER_PRIVATE_KEY` / `VAPID_SUBJECT`. Subscriptions live in
+  `push_subscriptions` and `push_deliveries.dedupe_key` stops the same pending item from
+  notifying twice. On iPhone it only works once the panel is added to the Home Screen (iOS 16.4+).
+  The service worker caches no API response.
 
 ### Known MercadoLibre constraints
 
@@ -110,7 +152,10 @@ only on explicit confirmation in the UI, applies it to MercadoLibre. New listing
 
 ## Modules (sidebar: `src/components/nav.ts`)
 
-Inicio · Publicaciones · Pedidos · Stock y producción · Métricas · Contenido · Configuración.
+Inicio · Pedidos · Preguntas · Inventario (`/stock`) · Producción · Publicaciones · Métricas ·
+Contenido · Configuración. On mobile the bar shows Inicio, Pedidos, Preguntas and Inventario;
+the rest lives under "Más".
+
 Frontend pages in `src/pages/`, matching API routers in `worker/routes/` (`panel.ts` is the
-catch-all mounted at `/api/`; `ml.ts`, `ia.ts`, `seo.ts`, `catalogo.ts`, `contenido.ts` are
-mounted under their own prefixes).
+catch-all mounted at `/api/`; `ml.ts`, `ia.ts`, `seo.ts`, `catalogo.ts`, `contenido.ts`,
+`inventario.ts` and `preguntas.ts` are mounted under their own prefixes).

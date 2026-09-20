@@ -1,8 +1,8 @@
 # Indiggo · Panel
 
 Panel privado de un solo usuario para automatizar la operación de **Indiggo Store**
-en Mercado Libre (site MLA): publicaciones, stock y producción, métricas y contenido
-para redes, todo asistido por IA con pantalla de revisión antes de aplicar nada.
+en Mercado Libre (site MLA): catálogo consolidado, inventario físico, producción,
+pedidos, preguntas, métricas y contenido para redes.
 
 ## Stack
 
@@ -38,12 +38,16 @@ npx wrangler secret put ML_CLIENT_ID
 npx wrangler secret put ML_CLIENT_SECRET
 npx wrangler secret put ML_REDIRECT_URI
 npx wrangler secret put ML_SELLER_ID
+npx wrangler secret put VAPID_SERVER_PUBLIC_KEY
+npx wrangler secret put VAPID_SERVER_PRIVATE_KEY
+npx wrangler secret put VAPID_SUBJECT
 ```
 
 ## Build y deploy
 
 ```bash
 npm run build     # wrangler types + tsc + vite build  ->  dist/
+npm test          # pruebas críticas de inventario, concurrencia y preguntas
 npm run deploy    # build + wrangler deploy
 ```
 
@@ -63,7 +67,10 @@ npx wrangler secret bulk .dev.vars   # sube los secretos al Worker desplegado
    (publicaciones + variantes + pedidos de los últimos 60 días).
 
 El `access_token` (6 h) se refresca solo por cron cada 4 h; el sync corre cada hora.
-ML también notifica en tiempo real a `/api/ml/notifications`.
+
+ML también notifica en tiempo real. En el devcenter, la app tiene la misma URL
+para el redirect de OAuth y para las notificaciones, así que el Worker acepta el
+POST de ML tanto en `/api/ml/notifications` como en `/api/ml/callback`.
 
 ## Seguridad
 
@@ -78,14 +85,20 @@ Ver [`docs/seguridad.md`](docs/seguridad.md). Resumen:
 src/
   App.tsx              layout + ruteo (sidebar fijo + drawer mobile) + Gate (clave)
   components/          Sidebar, Logo, Gate, íconos, primitivos de UI
-  pages/               Inicio, Publicaciones, Stock, Metricas, Contenido, Configuracion
+  pages/               Inicio, Pedidos, Preguntas, Inventario, Produccion,
+                       Publicaciones, Metricas, Contenido, Configuracion
   lib/                 api (fetch + hook), auth, theme, format, database.types
 worker/
   index.ts             entry: fetch (Hono) + scheduled (cron)
-  routes/              api (+ gate), ml, catalogo, panel, ia, contenido
-  lib/                 ml (OAuth), sync, derivar (catálogo), bom (planificador),
-                       alertas, claude, kie, supabase
-supabase/migrations/   0001-0010
+  routes/              api (+ gate), ml, inventario, preguntas, catalogo, panel,
+                       ia, seo, contenido
+  lib/                 ml (OAuth), sync, derivar (catálogo), inventory-logic
+                       (armados y piezas compartidas), stock (colchón de ML),
+                       questions, push, bom (planificador), alertas, claude,
+                       kie, sheets, supabase
+tests/                 inventario, contrato de migraciones y preguntas
+public/                manifest.webmanifest + sw.js (app en la pantalla de inicio)
+supabase/migrations/   esquema, inventario transaccional, preguntas y Web Push
 docs/seguridad.md      pasos para PANEL_TOKEN y Cloudflare Access
 ```
 
@@ -95,19 +108,30 @@ docs/seguridad.md      pasos para PANEL_TOKEN y Cloudflare Access
 |---|---|
 | **Inicio** | Resumen del día + alertas automáticas (stock, publicaciones, producción) + últimos pedidos |
 | **Publicaciones** | Lista real de ML · "IA" por fila (reescribe título/desc, aplica a ML) · "+ Crear con IA" (crea en pausa) · "Editar precios" (masivo por %) |
-| **Stock y producción** | Tabs Variantes / Insumos con edición inline · pushea el buffer a ML · planificador que explota la lista de materiales (cuerpos 3D + photocards) |
-| **Métricas** | Ventas por día, totales, ticket, top 5, comparación con el período anterior |
+| **Inventario** | Productos terminados, reservas, piezas compartidas, recetas editables y movimientos trazables |
+| **Producción** | Registro de impresiones y armados sugeridos sin asignar una pieza dos veces |
+| **Preguntas** | Historial, respuesta automática con fuentes, revisión del vendedor y avisos Web Push |
+| **Métricas** | Ventas, cobertura, faltantes y proporción de respuestas automáticas |
 | **Contenido** | Imagen (nano-banana) o video (Veo3) + caption + hashtags con Claude, usando la foto real del producto |
-| **Configuración** | Conectar ML · derivar catálogo y lista de materiales · grupos e integrantes · estado de conexiones |
+| **Configuración** | Conectar ML · reglas comerciales que la IA puede afirmar · notificaciones del iPhone · envíos · derivar catálogo · grupos e integrantes |
 
 ## Cómo funciona la sincronización
 
 - OAuth2 + PKCE. El `access_token` (6 h) se refresca solo por cron cada 4 h.
 - Sync completo (publicaciones + variantes + pedidos 60 d) por cron cada hora, y
   webhook en tiempo real a `/api/ml/notifications` cuando cambia algo.
-- Al final de cada sync se regeneran las alertas.
+- Los pedidos pagados reservan terminados. El despacho consume la reserva una sola vez.
+- El stock físico y el publicado se mantienen separados; ML conserva el colchón 2 / +3.
+- Las preguntas llegan por webhook y se reconcilian cada hora por si se pierde un evento.
 
 ## Estado
 
-Los 6 módulos funcionan con datos reales de la cuenta INDIGGOSTORE. Pendiente:
-Cloudflare Access, carga del stock físico, ajuste fino del BOM.
+Antes de desplegar una versión que agregue tablas, aplicá las migraciones de
+`supabase/migrations` en orden. La migración `0023` guarda un snapshot del catálogo
+anterior (tabla `inventory_legacy_snapshot`) antes de consolidar el inventario;
+`0025` cierra el acceso público a las funciones de inventario y `0026` evita que
+un pedido ya despachado vuelva a reservar stock.
+
+Para recibir los avisos en el iPhone: abrí el panel en Safari, **Compartir →
+Agregar a inicio**, abrilo desde el ícono y tocá **Activar notificaciones** en
+Configuración (iOS 16.4 o posterior).

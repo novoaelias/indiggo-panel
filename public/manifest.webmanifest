@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "Indiggo Store",
+  "short_name": "Indiggo",
+  "description": "Gestión de Mercado Libre, inventario y preguntas",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f9",
+  "theme_color": "#6850cf",
+  "icons": [
+    {
+      "src": "/brand/logo-full.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -185,8 +185,40 @@ interface MetricasResumen {
     pendientes: number;
     horas_respuesta: number | null;
   };
-  inventario: { unidades_faltantes: number; variantes_sin_libres: number };
+  inventario: {
+    unidades_faltantes: number;
+    variantes_sin_libres: number;
+    cobertura_dias: number | null;
+    variantes_bajo_cobertura: number;
+  };
 }
+
+/** Días que aguanta el stock terminado al ritmo de venta del período. Se toma
+ *  la mediana entre las variantes que efectivamente vendieron: el promedio lo
+ *  deforma la variante que no vende y tiene stock para un año. */
+function coberturaDeStock(
+  ventasPorVariante: Map<string, number>,
+  libresPorVariante: Map<string, number>,
+  dias: number,
+): { cobertura_dias: number | null; variantes_bajo_cobertura: number } {
+  const coberturas: number[] = [];
+  let bajo = 0;
+  for (const [varianteId, unidades] of ventasPorVariante) {
+    if (unidades <= 0) continue;
+    const diaria = unidades / dias;
+    const cobertura = (libresPorVariante.get(varianteId) ?? 0) / diaria;
+    coberturas.push(cobertura);
+    if (cobertura < DIAS_COBERTURA_MINIMA) bajo++;
+  }
+  if (!coberturas.length) return { cobertura_dias: null, variantes_bajo_cobertura: 0 };
+  coberturas.sort((a, b) => a - b);
+  return {
+    cobertura_dias: Math.round(coberturas[Math.floor(coberturas.length / 2)] * 10) / 10,
+    variantes_bajo_cobertura: bajo,
+  };
+}
+
+const DIAS_COBERTURA_MINIMA = 7;
 
 panel.get("/metricas", async (c) => {
   const dias = Math.min(Math.max(Number(c.req.query("dias") ?? 7), 1), 90);
@@ -208,8 +240,51 @@ panel.get("/metricas", async (c) => {
         .select("missing_qty")
         .eq("estado", "activa")
         .gt("missing_qty", 0),
-      db.from("product_variants").select("stock_real").eq("activo", true).eq("es_eleccion", false),
+      db
+        .from("product_variants")
+        .select("id,stock_real")
+        .eq("activo", true)
+        .eq("es_eleccion", false),
     ]);
+  // Cobertura de stock: unidades vendidas por variante en el período contra lo
+  // que queda libre (terminados menos lo reservado por pedidos).
+  const desde = new Date(Date.now() - dias * 86_400_000).toISOString();
+  const [ventasResp, reservadasResp] = await Promise.all([
+    (db as unknown as { from: (name: string) => any })
+      .from("ml_order_items")
+      .select("cantidad,product_variant_id,ml_orders!inner(estado,fecha)")
+      .eq("ml_orders.estado", "paid")
+      .gte("ml_orders.fecha", desde)
+      .not("product_variant_id", "is", null),
+    (db as unknown as { from: (name: string) => any })
+      .from("inventory_reservations")
+      .select("product_variant_id,reserved_qty")
+      .eq("estado", "activa"),
+  ]);
+  const ventasPorVariante = new Map<string, number>();
+  for (const row of (ventasResp.data ?? []) as any[])
+    ventasPorVariante.set(
+      row.product_variant_id,
+      (ventasPorVariante.get(row.product_variant_id) ?? 0) + Number(row.cantidad || 0),
+    );
+  const reservadoPorVariante = new Map<string, number>();
+  for (const row of (reservadasResp.data ?? []) as any[]) {
+    // reserved_qty es lo que quedó tomado de unidades terminadas; lo que no se
+    // pudo cubrir vive aparte en missing_qty y no descuenta stock.
+    const tomado = Number(row.reserved_qty || 0);
+    if (tomado <= 0) continue;
+    reservadoPorVariante.set(
+      row.product_variant_id,
+      (reservadoPorVariante.get(row.product_variant_id) ?? 0) + tomado,
+    );
+  }
+  const libresPorVariante = new Map<string, number>();
+  for (const row of (variantesResp.data ?? []) as any[])
+    libresPorVariante.set(
+      row.id,
+      Math.max(0, Number(row.stock_real || 0) - (reservadoPorVariante.get(row.id) ?? 0)),
+    );
+  const cobertura = coberturaDeStock(ventasPorVariante, libresPorVariante, dias);
   if (error) return c.json({ error: error.message }, 500);
   const questions = preguntasResp.data ?? [];
   const automaticas = questions.filter((row: any) => row.automatico).length;
@@ -247,6 +322,7 @@ panel.get("/metricas", async (c) => {
       variantes_sin_libres: (variantesResp.data ?? []).filter(
         (row) => Number(row.stock_real || 0) <= 0,
       ).length,
+      ...cobertura,
     },
   } satisfies MetricasResumen);
 });

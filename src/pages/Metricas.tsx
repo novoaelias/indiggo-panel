@@ -19,7 +19,12 @@ interface MetricasData {
     pendientes: number;
     horas_respuesta: number | null;
   };
-  inventario: { unidades_faltantes: number; variantes_sin_libres: number };
+  inventario: {
+    unidades_faltantes: number;
+    variantes_sin_libres: number;
+    cobertura_dias: number | null;
+    variantes_bajo_cobertura: number;
+  };
 }
 
 function delta(actual: number, prev: number): string | null {
@@ -82,7 +87,32 @@ export function Metricas() {
             />
           </div>
 
-          <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-5">
+          <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+            <Kpi
+              label="Cobertura de stock"
+              value={
+                data.inventario.cobertura_dias == null
+                  ? "—"
+                  : `${data.inventario.cobertura_dias} días`
+              }
+              nota={
+                data.inventario.variantes_bajo_cobertura
+                  ? `${data.inventario.variantes_bajo_cobertura} variantes por debajo de 7 días`
+                  : "Ninguna variante por debajo de 7 días"
+              }
+            />
+            <Kpi
+              label="Unidades faltantes"
+              value={String(data.inventario.unidades_faltantes)}
+              nota="Comprometidas con pedidos y todavía sin armar"
+            />
+            <Kpi
+              label="Variantes sin stock libre"
+              value={String(data.inventario.variantes_sin_libres)}
+            />
+          </div>
+
+          <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-4">
             <Kpi
               label="Preguntas respondidas"
               value={String(data.preguntas.respondidas)}
@@ -104,10 +134,6 @@ export function Metricas() {
             <Kpi
               label="Preguntas pendientes"
               value={String(data.preguntas.pendientes)}
-            />
-            <Kpi
-              label="Unidades faltantes"
-              value={String(data.inventario.unidades_faltantes)}
             />
           </div>
 
@@ -182,10 +208,12 @@ function Kpi({
   label,
   value,
   delta,
+  nota,
 }: {
   label: string;
   value: string;
   delta?: string | null;
+  nota?: string;
 }) {
   const positivo = delta?.startsWith("+");
   return (
@@ -209,6 +237,7 @@ function Kpi({
           vs. período anterior
         </div>
       )}
+      {nota && <div className="mt-0.5 text-[11px] text-ink/40">{nota}</div>}
     </Card>
   );
 }

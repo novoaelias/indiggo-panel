@@ -3,7 +3,10 @@ import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import {
   answerInMl,
+  draftLiteral,
   draftWithOwnerContext,
+  estiloDeLaTienda,
+  firmar,
   processPendingQuestions,
   reconcileQuestions,
 } from "../lib/questions";
@@ -65,16 +68,32 @@ preguntas.post("/sync", async (c) => {
 });
 
 preguntas.post("/:id/draft", async (c) => {
-  const body = await c.req.json<{ context?: string }>();
+  // literal = usar el texto de Elias tal cual, sólo firmado. Cuando ya escribió
+  // la respuesta como la quiere, pasarla por el modelo sólo la empeora.
+  const body = await c.req.json<{ context?: string; literal?: boolean }>();
   if (!body.context?.trim()) return c.json({ error: "contame qué debería responder" }, 400);
   const db = dbFor(c.env);
   const { data: question } = await db
     .from("ml_questions")
-    .select("pregunta")
+    .select("pregunta,ml_item_id,products(nombre,nombre_interno)")
     .eq("id", c.req.param("id"))
     .maybeSingle();
   if (!question) return c.json({ error: "pregunta inexistente" }, 404);
-  const suggestion = await draftWithOwnerContext(c.env, question.pregunta, body.context.trim());
+  // ml_questions.ml_item_id no tiene FK contra ml_listings, así que el título
+  // se busca aparte (igual que en el listado).
+  let producto: string | null =
+    question.products?.nombre_interno || question.products?.nombre || null;
+  if (!producto) {
+    const { data: listing } = await db
+      .from("ml_listings")
+      .select("titulo")
+      .eq("ml_item_id", question.ml_item_id)
+      .maybeSingle();
+    producto = listing?.titulo ?? null;
+  }
+  const suggestion = body.literal
+    ? await draftLiteral(db, body.context.trim())
+    : await draftWithOwnerContext(c.env, db, question.pregunta, body.context.trim(), producto);
   await db
     .from("ml_questions")
     .update({
@@ -89,9 +108,12 @@ preguntas.post("/:id/draft", async (c) => {
 
 preguntas.post("/:id/send", async (c) => {
   const body = await c.req.json<{ answer?: string }>();
-  const answer = body.answer?.trim().slice(0, 2000);
-  if (!answer) return c.json({ error: "respuesta vacía" }, 400);
   const db = dbFor(c.env);
+  // Ninguna respuesta sale sin la firma de la tienda, ni siquiera una escrita
+  // a las apuradas directo en el cuadro final. Si ya la tiene, no se duplica.
+  const estilo = await estiloDeLaTienda(db);
+  const answer = body.answer?.trim() ? firmar(body.answer.trim(), estilo.firma) : "";
+  if (!answer) return c.json({ error: "respuesta vacía" }, 400);
   const { data: question } = await db
     .from("ml_questions")
     .select("id,product_id,pregunta,respuesta_usuario")

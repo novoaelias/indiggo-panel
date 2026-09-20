@@ -35,7 +35,7 @@ export function Configuracion() {
       </div>
       <div className="flex flex-col gap-8">
         {seccion === "conexion" && <><MercadoLibreSection /><ConexionesSection /></>}
-        {seccion === "reglas" && <ReglasSection />}
+        {seccion === "reglas" && <><EstiloSection /><ReglasSection /></>}
         {seccion === "notificaciones" && <NotificacionesSection />}
         {seccion === "envios" && <><FlexSection /><PlanillaRepartoSection /></>}
         {seccion === "catalogo" && <><CatalogoSection /><details className="secondary-section"><summary>Unir publicaciones del mismo producto</summary><UnirPublicacionesSection /></details></>}
@@ -54,6 +54,89 @@ interface Regla {
   producto: string;
 }
 
+/** "firma" y "tono" se guardan como reglas, pero no son datos que la IA pueda
+ *  afirmar: definen cómo escribe. Por eso tienen su propia ficha y salen de la
+ *  lista de abajo. */
+const CLAVES_DE_ESTILO = ["firma", "tono"];
+const FIRMA_DEFECTO = "Saludos, equipo de Indiggo Store.";
+
+/** Cómo cierra y cómo trata cada respuesta pública. */
+function EstiloSection() {
+  const { data, reload } = useApi<{ reglas: Regla[] }>("/preguntas/reglas");
+  const guardadas = data?.reglas ?? [];
+  const firmaGuardada =
+    guardadas.find((r) => r.clave === "firma" && !r.product_id)?.valor ?? "";
+  const tonoGuardado =
+    guardadas.find((r) => r.clave === "tono" && !r.product_id)?.valor ?? "vos";
+  const [firma, setFirma] = useState<string | null>(null);
+  const [tono, setTono] = useState<string | null>(null);
+  const [guardando, setGuardando] = useState(false);
+  const [listo, setListo] = useState(false);
+
+  const firmaActual = firma ?? firmaGuardada;
+  const tonoActual = tono ?? tonoGuardado;
+
+  async function guardar() {
+    setGuardando(true);
+    setListo(false);
+    try {
+      for (const [clave, valor] of [
+        ["firma", firmaActual.trim() || FIRMA_DEFECTO],
+        ["tono", tonoActual],
+      ]) {
+        await api("/preguntas/reglas", {
+          method: "POST",
+          body: JSON.stringify({ clave, valor, product_id: null, temporal: false }),
+        });
+      }
+      setListo(true);
+      reload();
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2 className="mb-3.5 text-[15px] font-semibold">Estilo de las respuestas</h2>
+      <Card>
+        <div className="max-w-2xl space-y-4 text-[13.5px]">
+          <p className="text-ink/65">
+            Vale para las respuestas automáticas y para las que redactás vos:
+            ninguna sale sin este cierre.
+          </p>
+          <label className="block">
+            <span className="text-[11.5px] font-semibold">Firma</span>
+            <input
+              className="mt-1 w-full rounded-lg border hairline bg-surface px-3 py-2"
+              placeholder={FIRMA_DEFECTO}
+              value={firmaActual}
+              onChange={(e) => setFirma(e.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="text-[11.5px] font-semibold">Trato</span>
+            <select
+              className="mt-1 w-full rounded-lg border hairline bg-surface px-3 py-2"
+              value={tonoActual.includes("usted") ? "usted" : "vos"}
+              onChange={(e) => setTono(e.target.value)}
+            >
+              <option value="vos">De vos, cordial y profesional</option>
+              <option value="usted">De usted, formal</option>
+            </select>
+          </label>
+          <div className="flex items-center gap-3">
+            <PrimaryButton onClick={guardar} disabled={guardando}>
+              {guardando ? "Guardando…" : "Guardar estilo"}
+            </PrimaryButton>
+            {listo && <span className="text-[11.5px] text-ink/50">Guardado.</span>}
+          </div>
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 /** Datos que la IA puede dar por ciertos al responder una pregunta. */
 function ReglasSection() {
   const { data, reload } = useApi<{
@@ -66,6 +149,7 @@ function ReglasSection() {
   const [temporal, setTemporal] = useState(false);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState<string>();
+  const reglas = (data?.reglas ?? []).filter((r) => !CLAVES_DE_ESTILO.includes(r.clave));
 
   async function guardar() {
     if (!clave.trim() || !valor.trim()) return;
@@ -143,10 +227,10 @@ function ReglasSection() {
           </PrimaryButton>
 
           <div className="divide-y hairline border-t hairline pt-1">
-            {(data?.reglas ?? []).length === 0 && (
+            {reglas.length === 0 && (
               <div className="py-3 text-ink/50">Todavía no cargaste reglas.</div>
             )}
-            {(data?.reglas ?? []).map((r) => (
+            {reglas.map((r) => (
               <div key={r.id} className="flex items-start gap-3 py-3">
                 <div className="min-w-0 flex-1">
                   <div className="font-semibold">

@@ -302,13 +302,41 @@ catalogo.delete("/integrantes/:id", async (c) => {
 // --- Categorías ---
 catalogo.get("/productos", async (c) => {
   const db = supa(c.env);
-  const { data, error } = await db
+  const [{ data, error }, { data: listings }] = await Promise.all([
+    db
     .from("products")
-    .select("id, nombre")
+    .select("id,nombre,nombre_interno,notas")
     .eq("activo", true)
-    .order("nombre");
+    .order("nombre"),
+    db
+      .from("ml_listings")
+      .select("product_id,thumbnail,raw")
+      .in("estado", ["active", "paused"])
+      .not("product_id", "is", null),
+  ]);
   if (error) return c.json({ error: error.message }, 500);
-  return c.json({ productos: data });
+  const imagenes = new Map<string, string[]>();
+  for (const listing of listings ?? []) {
+    if (!listing.product_id) continue;
+    const rawPictures = Array.isArray((listing.raw as any)?.pictures)
+      ? (listing.raw as any).pictures
+          .map((picture: any) => picture?.secure_url || picture?.url)
+          .filter(Boolean)
+      : [];
+    const actuales = imagenes.get(listing.product_id) ?? [];
+    for (const url of [listing.thumbnail, ...rawPictures])
+      if (url && !actuales.includes(url) && actuales.length < 6)
+        actuales.push(String(url).replace(/^http:/, "https:"));
+    imagenes.set(listing.product_id, actuales);
+  }
+  return c.json({
+    productos: (data ?? []).map((product) => ({
+      id: product.id,
+      nombre: product.nombre_interno || product.nombre,
+      descripcion: product.notas,
+      imagenes: imagenes.get(product.id) ?? [],
+    })),
+  });
 });
 
 catalogo.get("/categorias", async (c) => {

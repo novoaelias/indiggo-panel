@@ -77,22 +77,30 @@ contenido.post("/generar", async (c) => {
   if (body.producto_id) {
     const { data: p } = await db
       .from("products")
-      .select("nombre, categories(nombre), groups(nombre)")
+      .select("nombre,nombre_interno,notas,categories(nombre),groups(nombre)")
       .eq("id", body.producto_id)
       .single();
     if (p) {
       const cat = (p.categories as { nombre?: string } | null)?.nombre;
       const grp = (p.groups as { nombre?: string } | null)?.nombre;
-      contextoProducto = `${p.nombre}${cat ? ` (${cat})` : ""}${grp ? `, grupo ${grp}` : ""}`;
+      contextoProducto = `${p.nombre_interno || p.nombre}${cat ? ` (${cat})` : ""}${grp ? `, grupo ${grp}` : ""}${p.notas ? `. Ficha verificada: ${p.notas}` : ""}`;
     }
-    const { data: ml } = await db
+    const { data: publicaciones } = await db
       .from("ml_listings")
-      .select("thumbnail")
+      .select("thumbnail,raw")
       .eq("product_id", body.producto_id)
-      .limit(1)
-      .maybeSingle();
-    if (ml?.thumbnail)
-      referencias.push(ml.thumbnail.replace(/^http:/, "https:"));
+      .in("estado", ["active", "paused"])
+      .limit(4);
+    for (const publicacion of publicaciones ?? []) {
+      const pictures = Array.isArray((publicacion.raw as any)?.pictures)
+        ? (publicacion.raw as any).pictures
+            .map((picture: any) => picture?.secure_url || picture?.url)
+            .filter(Boolean)
+        : [];
+      for (const url of [publicacion.thumbnail, ...pictures])
+        if (url && !referencias.includes(url) && referencias.length < 6)
+          referencias.push(String(url).replace(/^http:/, "https:"));
+    }
   }
   const hayRef = referencias.length > 0;
 
@@ -105,7 +113,7 @@ contenido.post("/generar", async (c) => {
 Plataforma: ${plataforma}
 Formato: ${formato}
 ${body.objetivo ? `Objetivo: ${body.objetivo}` : ""}
-${hayRef ? "Hay una FOTO DE REFERENCIA del producto real; el prompt debe mantener el producto tal cual, mejorando luz/fondo/encuadre." : ""}
+${hayRef ? `Hay ${referencias.length} FOTO(S) DE REFERENCIA del producto real y una ficha del catálogo; el prompt debe mantener el producto tal cual, mejorando luz/fondo/encuadre.` : ""}
 
 Devolvé SOLO este JSON:
 {

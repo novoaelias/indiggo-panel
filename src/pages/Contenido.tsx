@@ -16,6 +16,8 @@ interface Pieza {
 interface Producto {
   id: string;
   nombre: string;
+  descripcion: string | null;
+  imagenes: string[];
 }
 
 interface Generacion {
@@ -304,6 +306,7 @@ function GenerarModal({
   const [objetivo, setObjetivo] = useState("");
   const [generando, setGenerando] = useState(false);
   const [err, setErr] = useState<string>();
+  const seleccionado = productos.find((p) => p.id === productoId);
 
   async function generar(e: React.FormEvent) {
     e.preventDefault();
@@ -360,6 +363,22 @@ function GenerarModal({
               ))}
             </select>
           </label>
+
+          {seleccionado && (
+            <div className="rounded-lg bg-ink/[0.03] p-3">
+              <div className="text-[11.5px] font-semibold">Ficha e imágenes reutilizadas</div>
+              {seleccionado.descripcion && (
+                <p className="mt-1 text-[11px] text-ink/55">{seleccionado.descripcion}</p>
+              )}
+              {seleccionado.imagenes.length > 0 && (
+                <div className="mt-2 flex gap-2 overflow-x-auto">
+                  {seleccionado.imagenes.map((url) => (
+                    <img key={url} src={url} alt="" className="h-14 w-14 shrink-0 rounded-md object-cover" />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex gap-2">
             {(["instagram", "tiktok"] as const).map((pl) => (

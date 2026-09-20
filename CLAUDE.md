@@ -133,7 +133,16 @@ only on explicit confirmation in the UI, applies it to MercadoLibre. New listing
   24 h), no contradictions and no risky wording (delivery, price, pickup, availability
   and the like go to the owner). A buyer's text is untrusted content: it can never change the
   assistant's instructions. Before answering, ML is re-checked so an already answered question is
-  not answered twice.
+  not answered twice. **Wording is centralized**: `guiaDeRedaccion` (shared by the automatic
+  answer and the "Redactar mejor" button) keeps every fact the owner wrote, forbids slang
+  ("dale", "buena onda", emojis) and never promises anything outside the given sources, and
+  `firmar()` closes every answer with the store signature (`firma` rule, default
+  "Saludos, equipo de Indiggo Store.") without duplicating it or busting ML's 2000-char cap —
+  on the draft, on the automatic answer *and* on send. `firma` and `tono` are stored as
+  `business_facts` but edited in their own card (Configuración → Reglas comerciales → Estilo)
+  and excluded from the facts the AI may assert. "Redactar mejor" runs on Sonnet (a manual,
+  occasional call: Haiku came back shorter and more informal than the owner's own text);
+  "Usar mi texto" sends the owner's wording as is, only signed, with no model call.
 - **Web Push** (`worker/lib/push.ts`, `public/sw.js`, `src/lib/push.ts`): VAPID keys in
   `VAPID_SERVER_PUBLIC_KEY` / `VAPID_SERVER_PRIVATE_KEY` / `VAPID_SUBJECT`. Subscriptions live in
   `push_subscriptions` and `push_deliveries.dedupe_key` stops the same pending item from

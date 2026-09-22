@@ -1808,6 +1808,7 @@ function PreciosModal({
   const { data } = useApi<Resp>("/publicaciones?estado=active");
   const [nuevos, setNuevos] = useState<Record<string, string>>({});
   const [pct, setPct] = useState("");
+  const [monto, setMonto] = useState("");
   const [aplicando, setAplicando] = useState(false);
   const [msg, setMsg] = useState<string>();
 
@@ -1820,6 +1821,17 @@ function PreciosModal({
     for (const it of lista) {
       if (it.precio == null) continue;
       next[it.id] = String(Math.round(it.precio * (1 + p / 100)));
+    }
+    setNuevos(next);
+  }
+
+  function aplicarMonto() {
+    const m = Number(monto);
+    if (!Number.isFinite(m) || m === 0) return;
+    const next: Record<string, string> = {};
+    for (const it of lista) {
+      if (it.precio == null) continue;
+      next[it.id] = String(Math.max(0, Math.round(it.precio + m)));
     }
     setNuevos(next);
   }
@@ -1870,8 +1882,10 @@ function PreciosModal({
           </button>
         </div>
 
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="text-[12.5px] text-ink/50">Ajuste masivo:</span>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="w-28 shrink-0 text-[12.5px] text-ink/50">
+            Ajuste por %:
+          </span>
           <input
             value={pct}
             onChange={(e) => setPct(e.target.value)}
@@ -1881,6 +1895,20 @@ function PreciosModal({
           />
           <span className="text-[12.5px] text-ink/50">%</span>
           <GhostButton onClick={aplicarPct}>Aplicar a todas</GhostButton>
+        </div>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="w-28 shrink-0 text-[12.5px] text-ink/50">
+            Ajuste por monto:
+          </span>
+          <span className="text-[12.5px] text-ink/50">$</span>
+          <input
+            value={monto}
+            onChange={(e) => setMonto(e.target.value)}
+            placeholder="ej: 1000 o -500"
+            inputMode="numeric"
+            className="w-24 rounded-lg border border-ink/12 px-2.5 py-1.5 text-[13px] outline-none focus:border-accent"
+          />
+          <GhostButton onClick={aplicarMonto}>Aplicar a todas</GhostButton>
           {Object.keys(nuevos).length > 0 && (
             <button
               onClick={() => setNuevos({})}

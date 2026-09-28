@@ -8,7 +8,8 @@ export type ClaudeModel = "claude-sonnet-5" | "claude-haiku-4-5";
 
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; source: { type: "url"; url: string } };
+  | { type: "image"; source: { type: "url"; url: string } }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
 
 interface ClaudeMessage {
   role: "user" | "assistant";
@@ -29,6 +30,50 @@ export function mensajeConImagenes(
     .map(
       (url): ContentBlock => ({ type: "image", source: { type: "url", url } }),
     );
+  return { role: "user", content: [...imgs, { type: "text", text: texto }] };
+}
+
+const TIPOS_IMAGEN = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+function aBase64(bytes: ArrayBuffer): string {
+  const u8 = new Uint8Array(bytes);
+  let bin = "";
+  for (let i = 0; i < u8.length; i += 0x8000)
+    bin += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+/**
+ * Igual que mensajeConImagenes, pero el Worker baja cada imagen y la manda
+ * embebida. Anthropic no puede bajar las fotos de mlstatic.com por URL
+ * ("Unable to download the file"), así que para fotos de publicaciones hay
+ * que usar esta.
+ */
+export async function mensajeConImagenesEmbebidas(
+  texto: string,
+  urls: string[],
+): Promise<ClaudeMessage> {
+  const imgs = await Promise.all(
+    urls
+      .filter(Boolean)
+      .slice(0, 20)
+      .map(async (url): Promise<ContentBlock> => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`no se pudo bajar ${url} (${res.status})`);
+        const tipo = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+        const media_type = TIPOS_IMAGEN.includes(tipo)
+          ? tipo
+          : url.endsWith(".webp")
+            ? "image/webp"
+            : url.endsWith(".png")
+              ? "image/png"
+              : "image/jpeg";
+        return {
+          type: "image",
+          source: { type: "base64", media_type, data: aBase64(await res.arrayBuffer()) },
+        };
+      }),
+  );
   return { role: "user", content: [...imgs, { type: "text", text: texto }] };
 }
 

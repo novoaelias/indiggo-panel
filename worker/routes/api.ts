@@ -3,6 +3,7 @@ import { getCookie } from "hono/cookie";
 import type { Env } from "../env";
 import { catalogo } from "./catalogo";
 import { contenido } from "./contenido";
+import { fotos } from "./fotos";
 import { ia } from "./ia";
 import { inventario } from "./inventario";
 import { ml } from "./ml";
@@ -61,6 +62,7 @@ api.get("/status", (c) => {
 
 api.route("/catalogo", catalogo);
 api.route("/contenido", contenido);
+api.route("/fotos", fotos);
 api.route("/ml", ml);
 api.route("/ia", ia);
 api.route("/inventario", inventario);

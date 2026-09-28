@@ -172,11 +172,19 @@ panel.post("/publicaciones/precios", async (c) => {
 interface MetricasResumen {
   dias: number;
   ventas_totales: number;
+  /** Lo que acredita Mercado Pago después de comisión, retenciones y envío. */
+  ventas_netas: number;
+  comisiones: number;
+  impuestos: number;
+  envios: number;
+  /** Pedidos todavía sin liquidar: su neto sale de `sale_fee`, sin retenciones. */
+  pedidos_estimados: number;
   pedidos: number;
   ticket_promedio: number;
   ventas_prev: number;
+  ventas_netas_prev: number;
   pedidos_prev: number;
-  por_dia: Array<{ dia: string; monto: number; pedidos: number }>;
+  por_dia: Array<{ dia: string; monto: number; neto: number; pedidos: number }>;
   top: Array<{ nombre: string; unidades: number; ingreso: number }>;
   preguntas: {
     respondidas: number;

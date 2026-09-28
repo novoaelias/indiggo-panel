@@ -6,11 +6,17 @@ import { formatARS } from "@/lib/format";
 interface MetricasData {
   dias: number;
   ventas_totales: number;
+  ventas_netas: number;
+  comisiones: number;
+  impuestos: number;
+  envios: number;
+  pedidos_estimados: number;
   pedidos: number;
   ticket_promedio: number;
   ventas_prev: number;
+  ventas_netas_prev: number;
   pedidos_prev: number;
-  por_dia: Array<{ dia: string; monto: number; pedidos: number }>;
+  por_dia: Array<{ dia: string; monto: number; neto: number; pedidos: number }>;
   top: Array<{ nombre: string; unidades: number; ingreso: number }>;
   preguntas: {
     respondidas: number;
@@ -34,6 +40,29 @@ function delta(actual: number, prev: number): string | null {
 }
 
 const DIA_CORTO = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+/** Lo que se lleva Mercado Libre, en una línea: sólo lo que no es cero. */
+function desgloseCostos(d: MetricasData): string {
+  const partes = [
+    ["Comisión", d.comisiones],
+    ["Retenciones", d.impuestos],
+    ["Envíos", d.envios],
+  ] as const;
+  const visibles = partes.filter(([, monto]) => monto > 0);
+  if (!visibles.length) return "Sin cargos en este período";
+  return visibles.map(([nombre, monto]) => `${nombre} ${formatARS(monto)}`).join(" · ");
+}
+
+function notaNeto(d: MetricasData): string {
+  const pct = d.ventas_totales
+    ? Math.round((d.ventas_netas / d.ventas_totales) * 100)
+    : 0;
+  const base = `${pct}% de lo vendido`;
+  if (!d.pedidos_estimados) return base;
+  return `${base} · ${d.pedidos_estimados} ${
+    d.pedidos_estimados === 1 ? "pedido estimado" : "pedidos estimados"
+  } (ML todavía no liquidó)`;
+}
 
 export function Metricas() {
   const [dias, setDias] = useState(7);
@@ -70,20 +99,28 @@ export function Metricas() {
 
       {data && (
         <>
-          <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+          <div className="mb-6 grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
             <Kpi
-              label="Ventas totales"
+              label="Ventas brutas"
               value={formatARS(data.ventas_totales)}
               delta={delta(data.ventas_totales, data.ventas_prev)}
             />
             <Kpi
-              label="Ticket promedio"
-              value={formatARS(data.ticket_promedio)}
+              label="Te queda (neto)"
+              value={formatARS(data.ventas_netas)}
+              delta={delta(data.ventas_netas, data.ventas_netas_prev)}
+              nota={notaNeto(data)}
+            />
+            <Kpi
+              label="Costos de Mercado Libre"
+              value={formatARS(data.comisiones + data.impuestos + data.envios)}
+              nota={desgloseCostos(data)}
             />
             <Kpi
               label="Pedidos"
               value={String(data.pedidos)}
               delta={delta(data.pedidos, data.pedidos_prev)}
+              nota={`Ticket promedio ${formatARS(data.ticket_promedio)}`}
             />
           </div>
 
@@ -138,27 +175,42 @@ export function Metricas() {
           </div>
 
           <Card className="mb-6">
-            <div className="mb-5 text-[14px] font-semibold">Ventas por día</div>
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[14px] font-semibold">Ventas por día</div>
+              <div className="flex gap-3.5 text-[11.5px] text-ink/50">
+                <span className="flex items-center gap-1.5">
+                  <span className="size-2.5 rounded-[3px] bg-accent" />
+                  Neto
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="size-2.5 rounded-[3px] bg-accent/30" />
+                  Costos de ML
+                </span>
+              </div>
+            </div>
             <div className="flex h-40 items-end gap-1.5 overflow-x-auto">
               {data.por_dia.map((d) => {
                 const dow = new Date(d.dia + "T12:00:00").getDay();
                 return (
                   <div
                     key={d.dia}
-                    title={`${d.dia}: ${formatARS(d.monto)} · ${d.pedidos} pedidos`}
+                    title={`${d.dia}: ${formatARS(d.monto)} bruto · ${formatARS(d.neto)} neto · ${d.pedidos} pedidos`}
                     className="flex h-full min-w-[24px] flex-1 flex-col items-center justify-end gap-2"
                   >
+                    {/* La barra entera es el bruto; la parte llena, lo que queda. */}
                     <div
-                      className={cx(
-                        "w-full max-w-[26px] rounded-t-[4px]",
-                        d.monto === maxDia && d.monto > 0
-                          ? "bg-accent"
-                          : "bg-accent/35",
-                      )}
+                      className="flex w-full max-w-[26px] flex-col justify-end overflow-hidden rounded-t-[4px] bg-accent/30"
                       style={{
                         height: `${Math.max((d.monto / maxDia) * 100, d.monto > 0 ? 4 : 0)}%`,
                       }}
-                    />
+                    >
+                      <div
+                        className="w-full bg-accent"
+                        style={{
+                          height: `${d.monto > 0 ? Math.min(100, Math.max(0, (d.neto / d.monto) * 100)) : 0}%`,
+                        }}
+                      />
+                    </div>
                     <div className="text-[11px] text-ink/50">
                       {dias <= 14
                         ? DIA_CORTO[dow]

@@ -134,6 +134,23 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
   seconds after the payment, so a payment with no `fee` charge is not stored yet; the hourly
   sync retries (at most `NETOS_POR_SYNC` per run). Until then `panel_metricas` estimates the net
   from the order's `sale_fee` (per unit, times quantity) and reports it as `pedidos_estimados`.
+- **Photo editor** (`/publicaciones/fotos`, `worker/routes/fotos.ts`, pure logic in
+  `worker/lib/fotos.ts`): remove or add an object in every published photo of the chosen
+  listings. A batch (`photo_edit_batches`) holds the instruction plus reference photos; each
+  *distinct* ML picture is one `photo_edit_items` row (listings and variants share pictures, so
+  a shared photo is edited and uploaded once). Flow, each step driven by the panel in small
+  requests: detect (Claude vision, 8 photos per call) → edit (Nano Banana Pro on kie.ai,
+  `encargarEdicionPro` + `/items/:id/consultar` polling, because the kie queue can take
+  minutes) → owner approves each photo → per listing, upload to `/pictures/items/upload` and
+  PUT the same picture list with old ids swapped for new ones, variants' `picture_ids`
+  included. `photo_edit_applies.reemplazos` keeps old → new so each listing can be undone.
+  Hard-won details: the `-O` picture URL in `raw.pictures` is the 500 px copy, use `-F` for the
+  full one (`urlFotoCompleta`); Anthropic cannot fetch `mlstatic.com` URLs, so detection sends
+  the images inline (`mensajeConImagenesEmbebidas`); `google/nano-banana-edit` is not usable
+  for this (896x1152 output, and it removed half the product in testing).
+- **Local runs**: `npx wrangler dev` serves the last `npm run build` output (the Vite plugin
+  redirects the config to `dist/`), not the source: rebuild before testing a worker change,
+  and never rebuild while it runs.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.
 - **Questions** (`worker/lib/questions.ts`): ML notifies topic `questions`, and the hourly cron
@@ -175,6 +192,8 @@ Inicio · Pedidos · Preguntas · Inventario (`/stock`) · Producción · Public
 Contenido · Configuración. On mobile the bar shows Inicio, Pedidos, Preguntas and Inventario;
 the rest lives under "Más".
 
+The photo editor lives at `/publicaciones/fotos` (button "Editar fotos con IA" in Publicaciones).
+
 Frontend pages in `src/pages/`, matching API routers in `worker/routes/` (`panel.ts` is the
 catch-all mounted at `/api/`; `ml.ts`, `ia.ts`, `seo.ts`, `catalogo.ts`, `contenido.ts`,
-`inventario.ts` and `preguntas.ts` are mounted under their own prefixes).
+`inventario.ts`, `preguntas.ts` and `fotos.ts` are mounted under their own prefixes).

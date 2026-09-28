@@ -10,6 +10,7 @@ import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
 import { envioTerminado } from "./envios";
 import { fechaRepartoAR } from "./fecha";
 import { sincronizarStockML } from "./stock";
+import { syncNeto } from "./neto";
 
 type DB = SupabaseClient<Database>;
 
@@ -244,7 +245,7 @@ interface MlShipment {
 async function upsertOrder(
   db: DB,
   o: MlOrder,
-): Promise<{ id: string; shippingId: string | null }> {
+): Promise<{ id: string; shippingId: string | null; netoPendiente: boolean }> {
   const { data: order, error } = await db
     .from("ml_orders")
     .upsert(
@@ -259,7 +260,7 @@ async function upsertOrder(
       },
       { onConflict: "ml_order_id" },
     )
-    .select("id, stock_descontado_at")
+    .select("id, stock_descontado_at, neto_sync_at")
     .single();
   if (error || !order) throw new Error(`order ${o.id}: ${error?.message}`);
 
@@ -311,7 +312,11 @@ async function upsertOrder(
     await db.rpc("inventory_reserve_order", { p_order_id: order.id });
 
   const shippingId = o.shipping?.id != null ? String(o.shipping.id) : null;
-  return { id: order.id, shippingId };
+  return {
+    id: order.id,
+    shippingId,
+    netoPendiente: o.status === "paid" && !order.neto_sync_at,
+  };
 }
 
 async function resolverVariantePedido(
@@ -569,8 +574,11 @@ export async function syncOneOrder(
   const res = await mlFetch(env, db, `/orders/${orderId}`);
   if (!res.ok) throw new Error(`GET /orders/${orderId} → ${res.status}`);
   const o = (await res.json()) as MlOrder;
-  const { id, shippingId } = await upsertOrder(db, o);
+  const { id, shippingId, netoPendiente } = await upsertOrder(db, o);
   await syncEnvio(env, db, { id, shippingId, status: o.status }).catch(() => {});
+  // Recién cobrado, ML suele no haber cargado la comisión todavía: en ese caso
+  // syncNeto no guarda nada y lo completa el cron.
+  if (netoPendiente) await syncNeto(env, db, { id, raw: o }).catch(() => {});
   await restaurarSiCancelado(db, id, o.status).catch(() => {});
   // Empuja el buffer a ML al toque (no espera al cron horario): si esta venta
   // dejó una publicación en 0, ML deja de recomendarla hasta que se sincronice.
@@ -591,6 +599,7 @@ async function syncPedidos(
   ).toISOString();
   let total = 0;
   const activos: Array<{ id: string; shippingId: string | null; status: string }> = [];
+  const sinNeto: Array<{ id: string; raw: MlOrder }> = [];
   for (let offset = 0; offset < 2000; offset += 50) {
     const qs = new URLSearchParams({
       seller: String(userId),
@@ -610,8 +619,9 @@ async function syncPedidos(
 
     for (const o of page.results) {
       try {
-        const { id, shippingId } = await upsertOrder(db, o);
+        const { id, shippingId, netoPendiente } = await upsertOrder(db, o);
         total++;
+        if (netoPendiente) sinNeto.push({ id, raw: o });
         const entregado = (o.tags ?? []).includes("delivered");
         if (o.status === "paid" && shippingId && !entregado)
           activos.push({ id, shippingId, status: o.status });
@@ -632,8 +642,21 @@ async function syncPedidos(
       ),
     );
   }
+  // Neto de cada venta (lo que acredita Mercado Pago). Se guarda una sola vez
+  // por pedido; el tope evita que la primera pasada, con todo el historial sin
+  // neto, se coma los subrequests del cron: lo que queda sale en la próxima.
+  const lote = sinNeto.slice(0, NETOS_POR_SYNC);
+  for (let i = 0; i < lote.length; i += 5) {
+    await Promise.all(
+      lote.slice(i, i + 5).map((ref) =>
+        seguro(errores, `neto ${ref.raw.id}`, () => syncNeto(env, db, ref)),
+      ),
+    );
+  }
   return total;
 }
+
+const NETOS_POR_SYNC = 60;
 
 // ---------- orquestador ----------
 export async function syncAll(env: Env, db: DB): Promise<SyncResult> {

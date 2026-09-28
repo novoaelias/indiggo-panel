@@ -170,7 +170,9 @@ export async function validToken(env: Env, db: DB): Promise<MlTokenRow> {
   return row;
 }
 
-/** fetch a la API de ML con Bearer y 1 reintento tras refrescar en 401. */
+/** fetch a la API de ML con Bearer y 1 reintento tras refrescar en 401.
+ *  Acepta también una URL absoluta: la API de Mercado Pago toma el mismo token
+ *  y es la única que dice cuánto se acredita realmente de cada cobro. */
 export async function mlFetch(
   env: Env,
   db: DB,
@@ -178,8 +180,9 @@ export async function mlFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   let token = await validToken(env, db);
+  const url = path.startsWith("https://") ? path : `${ML_API}${path}`;
   const doFetch = (t: string) =>
-    fetch(`${ML_API}${path}`, {
+    fetch(url, {
       ...init,
       headers: { ...init.headers, authorization: `Bearer ${t}` },
     });

@@ -823,48 +823,63 @@ export type Database = {
       }
       ml_orders: {
         Row: {
+          comision_ml: number | null
           comprador: string | null
           created_at: string
           envio_substatus: string | null
           envio_sync_at: string | null
+          envio_vendedor: number | null
           estado: string | null
           estado_envio: string | null
           fecha: string
           id: string
+          impuestos: number | null
           logistic_type: string | null
           ml_order_id: string
+          neto: number | null
+          neto_sync_at: string | null
           raw: Json | null
           sheet_synced_at: string | null
           stock_descontado_at: string | null
           total: number | null
         }
         Insert: {
+          comision_ml?: number | null
           comprador?: string | null
           created_at?: string
           envio_substatus?: string | null
           envio_sync_at?: string | null
+          envio_vendedor?: number | null
           estado?: string | null
           estado_envio?: string | null
           fecha: string
           id?: string
+          impuestos?: number | null
           logistic_type?: string | null
           ml_order_id: string
+          neto?: number | null
+          neto_sync_at?: string | null
           raw?: Json | null
           sheet_synced_at?: string | null
           stock_descontado_at?: string | null
           total?: number | null
         }
         Update: {
+          comision_ml?: number | null
           comprador?: string | null
           created_at?: string
           envio_substatus?: string | null
           envio_sync_at?: string | null
+          envio_vendedor?: number | null
           estado?: string | null
           estado_envio?: string | null
           fecha?: string
           id?: string
+          impuestos?: number | null
           logistic_type?: string | null
           ml_order_id?: string
+          neto?: number | null
+          neto_sync_at?: string | null
           raw?: Json | null
           sheet_synced_at?: string | null
           stock_descontado_at?: string | null

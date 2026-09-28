@@ -6,6 +6,7 @@ import { Gate } from "./components/Gate";
 import { IconMenu } from "./components/icons";
 const Inicio = lazy(() => import("./pages/Inicio").then(m => ({ default: m.Inicio })));
 const Publicaciones = lazy(() => import("./pages/Publicaciones").then(m => ({ default: m.Publicaciones })));
+const EditorFotos = lazy(() => import("./pages/EditorFotos").then(m => ({ default: m.EditorFotos })));
 const Pedidos = lazy(() => import("./pages/Pedidos").then(m => ({ default: m.Pedidos })));
 const Inventario = lazy(() => import("./pages/Inventario").then(m => ({ default: m.Inventario })));
 const Produccion = lazy(() => import("./pages/Produccion").then(m => ({ default: m.Produccion })));
@@ -55,6 +56,7 @@ function Panel() {
           <Routes>
             <Route path="/" element={<Inicio />} />
             <Route path="/publicaciones" element={<Publicaciones />} />
+            <Route path="/publicaciones/fotos" element={<EditorFotos />} />
             <Route path="/pedidos" element={<Pedidos />} />
             <Route path="/stock" element={<Inventario />} />
             <Route path="/produccion" element={<Produccion />} />

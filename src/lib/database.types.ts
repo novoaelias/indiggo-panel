@@ -952,6 +952,145 @@ export type Database = {
           },
         ]
       }
+      photo_edit_applies: {
+        Row: {
+          aplicada_at: string | null
+          batch_id: string
+          deshecha_at: string | null
+          error: string | null
+          estado: string
+          id: string
+          ml_item_id: string
+          reemplazos: Json
+        }
+        Insert: {
+          aplicada_at?: string | null
+          batch_id: string
+          deshecha_at?: string | null
+          error?: string | null
+          estado: string
+          id?: string
+          ml_item_id: string
+          reemplazos?: Json
+        }
+        Update: {
+          aplicada_at?: string | null
+          batch_id?: string
+          deshecha_at?: string | null
+          error?: string | null
+          estado?: string
+          id?: string
+          ml_item_id?: string
+          reemplazos?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "photo_edit_applies_batch_id_fkey"
+            columns: ["batch_id"]
+            isOneToOne: false
+            referencedRelation: "photo_edit_batches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      photo_edit_batches: {
+        Row: {
+          created_at: string
+          descripcion: string
+          id: string
+          ml_item_ids: string[]
+          modelo: string
+          modo: string
+          referencias: Json
+          ubicacion: string | null
+        }
+        Insert: {
+          created_at?: string
+          descripcion: string
+          id?: string
+          ml_item_ids: string[]
+          modelo: string
+          modo: string
+          referencias?: Json
+          ubicacion?: string | null
+        }
+        Update: {
+          created_at?: string
+          descripcion?: string
+          id?: string
+          ml_item_ids?: string[]
+          modelo?: string
+          modo?: string
+          referencias?: Json
+          ubicacion?: string | null
+        }
+        Relationships: []
+      }
+      photo_edit_items: {
+        Row: {
+          aspect_ratio: string | null
+          batch_id: string
+          deteccion: Json | null
+          editada_url: string | null
+          error: string | null
+          estado: string
+          id: string
+          intentos: number
+          kie_task_id: string | null
+          ml_item_ids: string[]
+          ml_picture_id: string
+          nota: string | null
+          nuevo_ml_picture_id: string | null
+          orden: number
+          original_url: string
+          updated_at: string
+        }
+        Insert: {
+          aspect_ratio?: string | null
+          batch_id: string
+          deteccion?: Json | null
+          editada_url?: string | null
+          error?: string | null
+          estado?: string
+          id?: string
+          intentos?: number
+          kie_task_id?: string | null
+          ml_item_ids: string[]
+          ml_picture_id: string
+          nota?: string | null
+          nuevo_ml_picture_id?: string | null
+          orden?: number
+          original_url: string
+          updated_at?: string
+        }
+        Update: {
+          aspect_ratio?: string | null
+          batch_id?: string
+          deteccion?: Json | null
+          editada_url?: string | null
+          error?: string | null
+          estado?: string
+          id?: string
+          intentos?: number
+          kie_task_id?: string | null
+          ml_item_ids?: string[]
+          ml_picture_id?: string
+          nota?: string | null
+          nuevo_ml_picture_id?: string | null
+          orden?: number
+          original_url?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "photo_edit_items_batch_id_fkey"
+            columns: ["batch_id"]
+            isOneToOne: false
+            referencedRelation: "photo_edit_batches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       product_variants: {
         Row: {
           activo: boolean

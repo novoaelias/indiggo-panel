@@ -126,6 +126,14 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
   (fixed UTC−3) via `worker/lib/fecha.ts` (`hoyAR`, `inicioDiaAR`, …), never `toISOString()`.
 - **`@/*` alias → `src/*`** in the frontend *and* the worker tsconfig; the Worker imports shared
   DB types from `src/lib/database.types.ts`.
+- **Net per sale** (`worker/lib/neto.ts`): `ml_orders.total` is gross. What Mercado Pago actually
+  credits (after ML's percentage fee, installments add-on, flat fee per unit, tax withholdings
+  and seller-paid shipping) comes from `GET api.mercadopago.com/v1/payments/{id}` with the same
+  ML token (`mlFetch` accepts absolute URLs) and is stored once in `ml_orders.neto` +
+  `comision_ml` / `impuestos` / `envio_vendedor` / `neto_sync_at`. ML adds the fee charges a few
+  seconds after the payment, so a payment with no `fee` charge is not stored yet; the hourly
+  sync retries (at most `NETOS_POR_SYNC` per run). Until then `panel_metricas` estimates the net
+  from the order's `sale_fee` (per unit, times quantity) and reports it as `pedidos_estimados`.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.
 - **Questions** (`worker/lib/questions.ts`): ML notifies topic `questions`, and the hourly cron

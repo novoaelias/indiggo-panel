@@ -111,6 +111,12 @@ export async function claude(
 
   if (!res.ok) {
     const detalle = await res.text();
+    // Una clave revocada o vencida deja muda a toda la IA del panel; que el
+    // mensaje diga qué hay que cambiar en lugar del JSON crudo de Anthropic.
+    if (res.status === 401)
+      throw new Error(
+        "La clave de Claude (ANTHROPIC_API_KEY) no es válida o fue revocada. Cargá una nueva con `npx wrangler secret put ANTHROPIC_API_KEY`.",
+      );
     throw new Error(`Claude ${res.status}: ${detalle.slice(0, 300)}`);
   }
 

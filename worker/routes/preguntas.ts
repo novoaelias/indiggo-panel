@@ -95,9 +95,16 @@ preguntas.post("/:id/draft", async (c) => {
       .maybeSingle();
     producto = listing?.titulo ?? null;
   }
-  const suggestion = body.literal
-    ? await draftLiteral(db, body.context.trim())
-    : await draftWithOwnerContext(c.env, db, question.pregunta, body.context.trim(), producto);
+  let suggestion: string;
+  try {
+    suggestion = body.literal
+      ? await draftLiteral(db, body.context.trim())
+      : await draftWithOwnerContext(c.env, db, question.pregunta, body.context.trim(), producto);
+  } catch (error) {
+    // Sin esto la excepción salía como un 500 en texto plano y el panel no
+    // tenía qué mostrar.
+    return c.json({ error: (error as Error).message }, 502);
+  }
   await db
     .from("ml_questions")
     .update({

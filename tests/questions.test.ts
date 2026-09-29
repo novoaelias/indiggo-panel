@@ -4,8 +4,8 @@ import {
   FIRMA_DEFECTO,
   esConsultaRiesgosa,
   firmar,
+  fuentesValidas,
   guiaDeRedaccion,
-  hayContradiccion,
   similitud,
 } from "../worker/lib/questions";
 
@@ -29,13 +29,25 @@ describe("decisión de preguntas", () => {
     ).toBeGreaterThan(0.35);
   });
 
-  it("deriva a revisión cuando las fuentes pertinentes se contradicen", () => {
-    expect(
-      hayContradiccion([
-        { respuesta: "Sí, incluye las siete opciones.", score: 0.8 },
-        { respuesta: "No, el pack trae una sola opción.", score: 0.7 },
-      ]),
-    ).toBe(true);
+  // El caso real: contestada siete veces con otras palabras y derivada igual,
+  // porque la similitud por palabras daba 0,12 y el corte era 0,55.
+  it("saludos y plurales no tapan la misma duda", () => {
+    const nueva = "Hola, buen día, quería saber si son 50 circuitos o 50 logos enteros ?";
+    expect(similitud(nueva, "Hola cada mostacilla corresponde a un logo completo o a un circulo solo?")).toBeGreaterThan(0.2);
+    expect(similitud(nueva, "hola, es solamente el logo no?")).toBeGreaterThan(0.2);
+  });
+
+  it("la respuesta automática decide el modelo, no un corte por palabras", () => {
+    expect(fuente).not.toContain("enoughEvidence");
+    expect(fuente).toContain("fuentesValidas(proposal.fuentes, disponibles)");
+  });
+
+  it("sin una fuente real citada, la respuesta no sale sola", () => {
+    const disponibles = new Set(["historial:1", "dato:envios", "publicacion"]);
+    expect(fuentesValidas(["historial:1", "historial:1", "inventada:9"], disponibles)).toEqual(["historial:1"]);
+    expect(fuentesValidas([], disponibles)).toEqual([]);
+    expect(fuentesValidas("historial:1", disponibles)).toEqual([]);
+    expect(fuentesValidas(undefined, disponibles)).toEqual([]);
   });
 
   // Mercado Libre puede haber sido respondido desde la app: antes de enviar se

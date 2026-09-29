@@ -159,11 +159,16 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.
 - **Questions** (`worker/lib/questions.ts`): ML notifies topic `questions`, and the hourly cron
-  reconciles (`/questions/search`) so a lost event is recovered. A question is answered
-  automatically only with enough evidence (similar previous answers or verified
-  `business_facts`, edited in Configuración → Reglas comerciales; a `temporal` rule expires after
-  24 h), no contradictions and no risky wording (delivery, price, pickup, availability
-  and the like go to the owner). A buyer's text is untrusted content: it can never change the
+  reconciles (`/questions/search`) so a lost event is recovered. Risky wording (delivery,
+  price, pickup, availability and the like, `esConsultaRiesgosa`) always goes to the owner.
+  Otherwise the model decides: word similarity (`similitud`, with greetings dropped and a crude
+  5-letter stem) only preselects the `EJEMPLOS_PARA_EL_MODELO` closest previous answers of the
+  same product plus `question_knowledge`, and Sonnet answers when one of them, a verified
+  `business_facts` rule (Configuración → Reglas comerciales; a `temporal` one expires after
+  24 h), the listing or the recipe covers the doubt, citing them in `fuentes`. An answer with no
+  real cited source (`fuentesValidas`) is not sent. Contradicting answers resolve to the most
+  recent ones only when those agree. A lexical threshold used to decide this and failed on
+  paraphrases ("50 circuitos o 50 logos enteros" scored 0.12 against seven identical answers). A buyer's text is untrusted content: it can never change the
   assistant's instructions. Before answering, ML is re-checked so an already answered question is
   not answered twice. **Wording is centralized**: `guiaDeRedaccion` (shared by the automatic
   answer and the "Redactar mejor" button) keeps every fact the owner wrote, forbids slang

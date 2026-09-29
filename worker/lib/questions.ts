@@ -102,7 +102,7 @@ export function guiaDeRedaccion(
           "- Conservá todo lo que dice la aclaración del vendedor: nombres propios, medidas, cantidades, lugares, días, horarios, condiciones y matices. No resumas ni recortes datos.",
           "- La aclaración es un apunte en crudo, sin estructura ni gramática cuidada: reescribila entera con tus palabras, ordenada y bien redactada, como una respuesta de venta.",
           "- Abrí con un saludo y agradecé la consulta. Si el vendedor nombró al comprador, mantené ese nombre.",
-          "- Cuando venga natural, cerrá el cuerpo invitando a comprar o a consultar lo que necesite, sin presionar.",
+          "- Podés cerrar el cuerpo ofreciendo ayuda con cualquier otra duda. Nada de frases de venta ni invitaciones a comprar: prohibido \"te esperamos\", \"sumalo a tu colección\", \"no te lo pierdas\" y parecidas.",
           "- Usá el emoji de corazón violeta 💜, una o dos veces en toda la respuesta. Ningún otro emoji.",
           `- Nada de jerga ni muletillas: prohibido ${muletillas} y los signos repetidos.`,
         ]

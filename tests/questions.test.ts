@@ -100,6 +100,9 @@ describe("firma de la tienda", () => {
     expect(comercial).toContain("No resumas ni recortes datos");
     expect(comercial).toContain('"dale"');
     expect(comercial).toContain(FIRMA_DEFECTO);
+    // Elias probó y el cierre "te esperamos para que sumes..." quedó horrible.
+    expect(comercial).toContain('"te esperamos"');
+    expect(comercial).not.toContain("invitando a comprar");
     expect(guiaDeRedaccion({ firma: FIRMA_DEFECTO, trato: "vos" })).not.toContain("💜");
   });
 

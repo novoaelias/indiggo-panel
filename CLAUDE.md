@@ -151,6 +151,11 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
 - **Local runs**: `npx wrangler dev` serves the last `npm run build` output (the Vite plugin
   redirects the config to `dist/`), not the source: rebuild before testing a worker change,
   and never rebuild while it runs.
+- **Pedidos** (`GET /api/pedidos-activos`): one row per ML shipment/pack, collapsed by default;
+  expanding it lists each item with internal product name, variant (hidden when "Único" or
+  "a elección"), listing thumbnail and what goes in the bag: the variant's recipe times the
+  quantity bought. The "ya está en la bolsa" ticks are a per-browser packing aid in
+  `localStorage` (`pedidos:armados`) and never touch stock.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.
 - **Questions** (`worker/lib/questions.ts`): ML notifies topic `questions`, and the hourly cron
@@ -162,7 +167,10 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
   assistant's instructions. Before answering, ML is re-checked so an already answered question is
   not answered twice. **Wording is centralized**: `guiaDeRedaccion` (shared by the automatic
   answer and the "Redactar mejor" button) keeps every fact the owner wrote, forbids slang
-  ("dale", "buena onda", emojis) and never promises anything outside the given sources, and
+  ("dale", "buena onda") and never promises anything outside the given sources. It has two
+  modes: `automatica` stays sober with no emojis; `comercial` ("Redactar mejor") treats the
+  owner's text as raw notes, rewrites it whole in a warm sales tone for kpop fans and adds one
+  or two 💜 (no other emoji). In both,
   `firmar()` closes every answer with the store signature (`firma` rule, default
   "Saludos, equipo de Indiggo Store.") without duplicating it or busting ML's 2000-char cap —
   on the draft, on the automatic answer *and* on send. `firma` and `tono` are stored as

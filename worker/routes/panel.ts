@@ -467,6 +467,20 @@ async function variantesElegibles(
   return out;
 }
 
+interface ItemPedido {
+  id: string;
+  titulo: string;
+  producto: string;
+  variante: string | null;
+  thumbnail: string | null;
+  contenido: Array<{ nombre: string; cantidad: number }>;
+  cantidad: number;
+  reservado: number;
+  faltante: number;
+  mapeado: boolean;
+  opciones: Array<{ id: string; etiqueta: string }>;
+}
+
 panel.get("/pedidos-activos", async (c) => {
   const db = supa(c.env);
 
@@ -494,7 +508,13 @@ panel.get("/pedidos-activos", async (c) => {
   const itemIds = (items ?? []).map((item) => item.id);
   const variantIds = [...new Set((items ?? []).map((item) => item.product_variant_id).filter(Boolean))] as string[];
   const dbLoosePedidos = db as unknown as { from: (name: string) => any };
-  const [{ data: reservationRows }, { data: choiceRows }] = await Promise.all([
+  const listingIds = [...new Set((items ?? []).map((item) => item.ml_item_id).filter(Boolean))];
+  const [
+    { data: reservationRows },
+    { data: choiceRows },
+    { data: recipeRows },
+    { data: listingRows },
+  ] = await Promise.all([
     itemIds.length
       ? dbLoosePedidos
           .from("inventory_reservations")
@@ -504,10 +524,37 @@ panel.get("/pedidos-activos", async (c) => {
     variantIds.length
       ? dbLoosePedidos
           .from("product_variants")
-          .select("id,es_eleccion")
+          .select("id,es_eleccion,etiqueta,products(nombre,nombre_interno)")
           .in("id", variantIds)
       : Promise.resolve({ data: [] }),
+    variantIds.length
+      ? dbLoosePedidos
+          .from("variant_components")
+          .select("variant_id,cantidad,components(nombre)")
+          .in("variant_id", variantIds)
+      : Promise.resolve({ data: [] }),
+    listingIds.length
+      ? dbLoosePedidos
+          .from("ml_listings")
+          .select("ml_item_id,thumbnail")
+          .in("ml_item_id", listingIds)
+      : Promise.resolve({ data: [] }),
   ]);
+  const variantById = new Map<string, any>(
+    (choiceRows ?? []).map((row: any) => [row.id, row]),
+  );
+  // Lo que lleva una unidad de cada variante, según la receta de Inventario.
+  // En el pedido se multiplica por la cantidad comprada: es lo que se mete en
+  // la bolsa al armar el paquete.
+  const recetaPorVariante = new Map<string, Array<{ nombre: string; cantidad: number }>>();
+  for (const row of recipeRows ?? []) {
+    const lista = recetaPorVariante.get(row.variant_id) ?? [];
+    lista.push({ nombre: row.components?.nombre ?? "Pieza", cantidad: Number(row.cantidad) || 0 });
+    recetaPorVariante.set(row.variant_id, lista);
+  }
+  const thumbnailPorItem = new Map<string, string | null>(
+    (listingRows ?? []).map((row: any) => [row.ml_item_id, row.thumbnail]),
+  );
   const choiceVariants = new Set(
     (choiceRows ?? []).filter((row: any) => row.es_eleccion).map((row: any) => row.id),
   );
@@ -525,27 +572,31 @@ panel.get("/pedidos-activos", async (c) => {
   const reservationByItem = new Map(
     (reservationRows ?? []).map((row: any) => [row.order_item_id, row]),
   );
-  const itemsPorPedido = new Map<
-    string,
-    Array<{
-      id: string;
-      titulo: string;
-      cantidad: number;
-      reservado: number;
-      faltante: number;
-      mapeado: boolean;
-      opciones: Array<{ id: string; etiqueta: string }>;
-    }>
-  >();
+  const itemsPorPedido = new Map<string, ItemPedido[]>();
   for (const it of items ?? []) {
     const arr = itemsPorPedido.get(it.ml_order_id) ?? [];
     const reservation = reservationByItem.get(it.id) as
       | { reserved_qty: number; missing_qty: number }
       | undefined;
+    const variante = it.product_variant_id ? variantById.get(it.product_variant_id) : null;
+    const cantidad = it.cantidad ?? 1;
     arr.push({
       id: it.id,
       titulo: it.titulo ?? "—",
-      cantidad: it.cantidad ?? 1,
+      producto:
+        variante?.products?.nombre_interno || variante?.products?.nombre || it.titulo || "—",
+      // "Único" no dice nada, y una variante "a elección" todavía no es la
+      // que va en la bolsa: en los dos casos no se muestra.
+      variante:
+        variante && !variante.es_eleccion && variante.etiqueta !== "Único"
+          ? variante.etiqueta
+          : null,
+      thumbnail: thumbnailPorItem.get(it.ml_item_id ?? "") ?? null,
+      contenido: (recetaPorVariante.get(it.product_variant_id ?? "") ?? []).map((pieza) => ({
+        nombre: pieza.nombre,
+        cantidad: pieza.cantidad * cantidad,
+      })),
+      cantidad,
       reservado: reservation?.reserved_qty ?? 0,
       faltante: reservation?.missing_qty ?? (it.product_variant_id ? it.cantidad : 0),
       mapeado: Boolean(it.product_variant_id) && !choiceVariants.has(it.product_variant_id),
@@ -570,15 +621,7 @@ panel.get("/pedidos-activos", async (c) => {
     comprador: string | null;
     fecha: string;
     total: number;
-    items: Array<{
-      id: string;
-      titulo: string;
-      cantidad: number;
-      reservado: number;
-      faltante: number;
-      mapeado: boolean;
-      opciones: Array<{ id: string; etiqueta: string }>;
-    }>;
+    items: ItemPedido[];
     faltantes: number;
     estado_envio: string | null;
     envio_substatus: string | null;

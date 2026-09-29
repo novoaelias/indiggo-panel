@@ -73,6 +73,7 @@ function QuestionCard({ question, selected, onSaved }: { question: Question; sel
   );
   const [temporal, setTemporal] = useState(false);
   const [working, setWorking] = useState<"draft" | "literal" | "send" | null>(null);
+  const [error, setError] = useState<string>();
   const pending = ["pendiente", "procesando", "necesita_respuesta", "sugerida", "error"].includes(question.estado_panel);
   const productName = question.products?.nombre_interno || question.products?.nombre || question.listing?.titulo || question.ml_item_id;
   const status = useMemo(() => {
@@ -82,25 +83,31 @@ function QuestionCard({ question, selected, onSaved }: { question: Question; sel
     if (question.estado_panel === "error") return <Badge tono="danger">Error</Badge>;
     return <Badge tono="warn">Necesita tu ayuda</Badge>;
   }, [question.estado_panel]);
-  // literal = tu texto tal cual, sólo firmado. "Redactar mejor" corrige la
-  // redacción sin sacarte datos ni cambiarte el tono.
+  // literal = tu texto tal cual, sólo firmado. "Redactar mejor" toma tu apunte
+  // en crudo y lo reescribe con tono comercial, sin sacarte datos.
   async function draft(literal = false) {
     if (!context.trim()) return;
     setWorking(literal ? "literal" : "draft");
+    setError(undefined);
     try {
       const result = await api<{ suggestion: string }>(`/preguntas/${question.id}/draft`, { method: "POST", body: JSON.stringify({ context, literal }) });
       setAnswer(result.suggestion);
+    } catch (err) {
+      setError((err as Error).message);
     } finally { setWorking(null); }
   }
   async function send() {
     if (!answer.trim()) return;
     setWorking("send");
+    setError(undefined);
     try {
       await api(`/preguntas/${question.id}/send`, {
         method: "POST",
         body: JSON.stringify({ answer, reutilizable, temporal }),
       });
       onSaved();
+    } catch (err) {
+      setError((err as Error).message);
     } finally { setWorking(null); }
   }
   return <Card className={cx(selected && "ring-2 ring-accent")}>
@@ -111,12 +118,13 @@ function QuestionCard({ question, selected, onSaved }: { question: Question; sel
       </div>
       {question.motivo_revision && <div className="mt-3 rounded-lg bg-warn-bg px-3 py-2 text-[11.5px] text-warn">{question.motivo_revision}</div>}
       {pending ? <div className="mt-4 border-t pt-4 hairline">
-        <label className="block text-[11.5px] font-semibold">Decime el dato que falta<textarea value={context} onChange={(e) => setContext(e.target.value)} placeholder="Ej.: sí, lo hacemos en negro y tarda dos días…" className="mt-1 min-h-20 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label>
+        <label className="block text-[11.5px] font-semibold">Decime el dato que falta<textarea value={context} onChange={(e) => setContext(e.target.value)} placeholder="Escribilo como te salga, ej.: si lo hacemos en negro tarda 2 dias" className="mt-1 min-h-20 w-full rounded-lg border border-ink/12 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <GhostButton disabled={working !== null || !context.trim()} onClick={() => draft(false)}>{working === "draft" ? "Redactando…" : "Redactar mejor"}</GhostButton>
           <GhostButton disabled={working !== null || !context.trim()} onClick={() => draft(true)}>{working === "literal" ? "Copiando…" : "Usar mi texto"}</GhostButton>
-          <span className="text-[10.5px] text-ink/40">Corrige la redacción sin sacar datos ni cambiar tu tono, y firma como Indiggo Store.</span>
+          <span className="text-[10.5px] text-ink/40">"Redactar mejor" lo reescribe con tono comercial y 💜 sin sacar datos; "Usar mi texto" lo manda tal cual. Los dos firman como Indiggo Store.</span>
         </div>
+        {error && <div className="mt-3 rounded-lg bg-danger-bg px-3 py-2 text-[11.5px] text-danger">{error}</div>}
         {(answer || question.sugerencia) && <div className="mt-4"><label className="block text-[11.5px] font-semibold">Respuesta final<textarea value={answer} maxLength={2000} onChange={(e) => setAnswer(e.target.value)} className="mt-1 min-h-24 w-full rounded-lg border border-accent/30 bg-accent-soft/40 px-3 py-2 text-[13px] outline-none focus:border-accent" /></label><div className="mt-3 flex flex-wrap gap-4 text-[11.5px] text-ink/55"><label className="flex items-center gap-2"><input type="checkbox" checked={reutilizable} onChange={(e) => setReutilizable(e.target.checked)} />Guardar para responder preguntas parecidas</label>{reutilizable && <label className="flex items-center gap-2"><input type="checkbox" checked={temporal} onChange={(e) => setTemporal(e.target.checked)} />Vale sólo por 24 horas</label>}</div><div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-ink/35">{answer.length}/2000</span><PrimaryButton disabled={working !== null || !answer.trim()} onClick={send}>{working === "send" ? "Enviando…" : "Enviar a Mercado Libre"}</PrimaryButton></div></div>}
       </div> : <div className="mt-4 rounded-lg bg-ink/[0.025] px-4 py-3 text-[13px] leading-relaxed">{question.respuesta}</div>}
     </div>

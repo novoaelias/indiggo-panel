@@ -91,6 +91,18 @@ describe("firma de la tienda", () => {
     );
   });
 
+  // "Redactar mejor" reescribe el apunte crudo con tono comercial y 💜, pero
+  // los datos, la firma y la prohibición de muletillas siguen valiendo; la
+  // automática sigue sin emojis.
+  it("el modo comercial suma el corazón violeta sin soltar los datos", () => {
+    const comercial = guiaDeRedaccion({ firma: FIRMA_DEFECTO, trato: "vos" }, "comercial");
+    expect(comercial).toContain("💜");
+    expect(comercial).toContain("No resumas ni recortes datos");
+    expect(comercial).toContain('"dale"');
+    expect(comercial).toContain(FIRMA_DEFECTO);
+    expect(guiaDeRedaccion({ firma: FIRMA_DEFECTO, trato: "vos" })).not.toContain("💜");
+  });
+
   // Una respuesta escrita a las apuradas en el cuadro final también se firma.
   it("el envío a Mercado Libre pasa por firmar()", () => {
     const ruta = readFileSync(

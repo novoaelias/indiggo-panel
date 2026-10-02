@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Badge, Card, EmptyHint, GhostButton, PageHeader, cx } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
-import { formatARS } from "@/lib/format";
+import { diaCorto, formatARS } from "@/lib/format";
 
 interface ItemPedido {
   id: string;
@@ -27,6 +27,8 @@ interface Paquete {
   envio_substatus: string | null;
   etiqueta_logistica: string;
   a_imprimir: boolean;
+  limite_despacho: string | null;
+  urgencia: "vencido" | "hoy" | "despues" | "sin_fecha";
 }
 interface PedidosResp {
   paquetes: Paquete[];
@@ -35,6 +37,35 @@ interface PedidosResp {
 }
 
 const ORDEN = ["Flex", "Mercado Envíos", "Full", "Otro"];
+
+/** Dentro de cada sección, un bloque por tipo de logística (Flex primero). */
+function agruparPorLogistica(paquetes: Paquete[]): Array<[string, Paquete[]]> {
+  const m = new Map<string, Paquete[]>();
+  for (const p of paquetes) {
+    if (!m.has(p.etiqueta_logistica)) m.set(p.etiqueta_logistica, []);
+    m.get(p.etiqueta_logistica)!.push(p);
+  }
+  return [...m.entries()].sort((a, b) => ORDEN.indexOf(a[0]) - ORDEN.indexOf(b[0]));
+}
+
+/** Lo vencido y lo que vence hoy sale hoy sí o sí: si no, ML penaliza la
+ *  reputación. Lo demás puede esperar al día que marca ML. */
+function esUrgente(p: Paquete): boolean {
+  return p.urgencia === "vencido" || p.urgencia === "hoy";
+}
+
+function Plazo({ paquete: p }: { paquete: Paquete }) {
+  if (p.urgencia === "vencido")
+    return (
+      <Badge tono="danger">
+        Demorado{p.limite_despacho ? ` · vencía el ${diaCorto(p.limite_despacho)}` : ""}
+      </Badge>
+    );
+  if (p.urgencia === "hoy") return <Badge tono="warn">Vence hoy</Badge>;
+  if (p.urgencia === "despues" && p.limite_despacho)
+    return <Badge tono="neutral">Hasta el {diaCorto(p.limite_despacho)}</Badge>;
+  return <span className="text-[11.5px] text-ink/45">Sin plazo de ML</span>;
+}
 
 const ENVIO_LABEL: Record<string, string> = {
   pending: "Pendiente",
@@ -127,16 +158,27 @@ export function Pedidos() {
   const [abiertos, setAbiertos] = useState<Set<string>>(() => new Set());
   const [armados, setArmados] = useState<Set<string>>(leerArmados);
 
-  const grupos = useMemo(() => {
-    if (!data) return [];
-    const m = new Map<string, Paquete[]>();
-    for (const p of data.paquetes) {
-      if (!m.has(p.etiqueta_logistica)) m.set(p.etiqueta_logistica, []);
-      m.get(p.etiqueta_logistica)!.push(p);
-    }
-    return [...m.entries()].sort(
-      (a, b) => ORDEN.indexOf(a[0]) - ORDEN.indexOf(b[0]),
-    );
+  const secciones = useMemo(() => {
+    const paquetes = data?.paquetes ?? [];
+    const urgentes = paquetes.filter(esUrgente);
+    const resto = paquetes.filter((p) => !esUrgente(p));
+    return {
+      urgentes,
+      grupos: [
+        {
+          id: "hoy",
+          titulo: "Despachar hoy sí o sí",
+          detalle: "Si no salen hoy, Mercado Libre los cuenta como demorados.",
+          grupos: agruparPorLogistica(urgentes),
+        },
+        {
+          id: "despues",
+          titulo: "Pueden esperar",
+          detalle: "Vencen otro día: se pueden despachar hoy o hasta la fecha que marca cada uno.",
+          grupos: agruparPorLogistica(resto),
+        },
+      ].filter((s) => s.grupos.length > 0),
+    };
   }, [data]);
 
   const todosAbiertos =
@@ -172,7 +214,9 @@ export function Pedidos() {
           data
             ? data.total === 0
               ? "Nada pendiente de despacho"
-              : `${data.total} ${data.total === 1 ? "paquete" : "paquetes"} sin despachar`
+              : `${data.total} ${data.total === 1 ? "paquete" : "paquetes"} sin despachar · ${
+                  secciones.urgentes.length
+                } para hoy`
             : "Pagados y sin despachar"
         }
         acciones={
@@ -194,30 +238,62 @@ export function Pedidos() {
         <EmptyHint>Todo despachado. 🎉</EmptyHint>
       )}
 
-      <div className="flex flex-col gap-7">
-        {grupos.map(([etiqueta, paquetes]) => (
-          <div key={etiqueta}>
-            <div className="mb-3 flex items-center gap-2.5">
-              <h2 className="text-[15px] font-semibold">{etiqueta}</h2>
-              <span className="rounded-full bg-ink/[0.06] px-2 py-0.5 text-[11.5px] font-bold text-ink/55">
-                {paquetes.length}
-              </span>
-            </div>
-            <Card padding={false} className="overflow-hidden">
-              {paquetes.map((p) => (
-                <FilaPaquete
-                  key={p.key}
-                  paquete={p}
-                  abierto={abiertos.has(p.key)}
-                  armados={armados}
-                  onAlternar={() => alternar(p.key)}
-                  onMarcar={marcar}
-                  onRecargar={reload}
-                />
-              ))}
-            </Card>
-          </div>
-        ))}
+      {data && data.total > 0 && secciones.urgentes.length === 0 && (
+        <EmptyHint>Nada vence hoy: todo lo pendiente puede esperar.</EmptyHint>
+      )}
+
+      <div className="flex flex-col gap-10">
+        {secciones.grupos.map((seccion) => {
+          const cantidad = seccion.grupos.reduce((sum, [, ps]) => sum + ps.length, 0);
+          return (
+            <section key={seccion.id}>
+              <div
+                className={cx(
+                  "mb-4 border-l-[3px] pl-3",
+                  seccion.id === "hoy" ? "border-danger" : "border-ink/15",
+                )}
+              >
+                <div className="flex items-center gap-2.5">
+                  <h2 className="text-[17px] font-bold">{seccion.titulo}</h2>
+                  <span
+                    className={cx(
+                      "rounded-full px-2 py-0.5 text-[11.5px] font-bold",
+                      seccion.id === "hoy" ? "bg-danger-bg text-danger" : "bg-ink/[0.06] text-ink/55",
+                    )}
+                  >
+                    {cantidad}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[12px] text-ink/55">{seccion.detalle}</p>
+              </div>
+              <div className="flex flex-col gap-6">
+                {seccion.grupos.map(([etiqueta, paquetes]) => (
+                  <div key={etiqueta}>
+                    <div className="mb-2.5 flex items-center gap-2.5">
+                      <h3 className="text-[14px] font-semibold">{etiqueta}</h3>
+                      <span className="rounded-full bg-ink/[0.06] px-2 py-0.5 text-[11.5px] font-bold text-ink/55">
+                        {paquetes.length}
+                      </span>
+                    </div>
+                    <Card padding={false} className="overflow-hidden">
+                      {paquetes.map((p) => (
+                        <FilaPaquete
+                          key={p.key}
+                          paquete={p}
+                          abierto={abiertos.has(p.key)}
+                          armados={armados}
+                          onAlternar={() => alternar(p.key)}
+                          onMarcar={marcar}
+                          onRecargar={reload}
+                        />
+                      ))}
+                    </Card>
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })}
       </div>
     </div>
   );
@@ -289,6 +365,7 @@ function FilaPaquete({
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2 pl-6 sm:gap-4 sm:pl-0">
+          <Plazo paquete={p} />
           {p.faltantes > 0 ? (
             <Badge tono="danger">Completar {p.faltantes}</Badge>
           ) : (

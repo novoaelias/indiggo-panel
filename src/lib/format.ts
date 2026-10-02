@@ -35,3 +35,14 @@ export function saludo(d = new Date()): string {
   if (h < 20) return "Buenas tardes";
   return "Buenas noches";
 }
+
+const diaYNumero = new Intl.DateTimeFormat("es-AR", {
+  weekday: "long",
+  day: "numeric",
+  timeZone: AR_TZ,
+});
+
+/** "lunes 5" — el día de una fecha en horario de Argentina. */
+export function diaCorto(iso: string): string {
+  return diaYNumero.format(new Date(iso)).replace(",", "");
+}

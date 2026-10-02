@@ -7,7 +7,12 @@ import { sheetsConfigurado, sheetsSuspendido } from "../lib/sheets";
 import { resolverAlertaManual, sincronizarStockML } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
 import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
-import { etiquetaLogistica, pedidoActivo } from "../lib/envios";
+import {
+  etiquetaLogistica,
+  pedidoActivo,
+  urgenciaDespacho,
+  type UrgenciaDespacho,
+} from "../lib/envios";
 
 export const panel = new Hono<{ Bindings: Env }>();
 
@@ -487,7 +492,7 @@ panel.get("/pedidos-activos", async (c) => {
   const { data: orders, error } = await db
     .from("ml_orders")
     .select(
-      "id, ml_order_id, comprador, fecha, total, estado, estado_envio, envio_substatus, logistic_type, raw",
+      "id, ml_order_id, comprador, fecha, total, estado, estado_envio, envio_substatus, logistic_type, envio_limite_despacho, raw",
     )
     .eq("estado", "paid")
     .gte("fecha", inicioDiaARHace(45))
@@ -627,6 +632,8 @@ panel.get("/pedidos-activos", async (c) => {
     envio_substatus: string | null;
     etiqueta_logistica: string;
     a_imprimir: boolean;
+    limite_despacho: string | null;
+    urgencia: UrgenciaDespacho;
   }
   const paquetes = new Map<string, Paquete>();
   for (const o of activos) {
@@ -639,6 +646,12 @@ panel.get("/pedidos-activos", async (c) => {
       cur.items.push(...its);
       cur.faltantes += its.reduce((sum, item) => sum + item.faltante, 0);
       if (o.fecha < cur.fecha) cur.fecha = o.fecha;
+      // Un pack comparte el envío, pero por las dudas manda el plazo más corto.
+      if (
+        o.envio_limite_despacho &&
+        (!cur.limite_despacho || o.envio_limite_despacho < cur.limite_despacho)
+      )
+        cur.limite_despacho = o.envio_limite_despacho;
     } else {
       paquetes.set(key, {
         key,
@@ -653,14 +666,20 @@ panel.get("/pedidos-activos", async (c) => {
         a_imprimir:
           o.envio_substatus === "ready_to_print" ||
           o.estado_envio === "ready_to_ship",
+        limite_despacho: o.envio_limite_despacho,
+        urgencia: "sin_fecha",
       });
     }
   }
+  const ahora = new Date();
+  for (const p of paquetes.values())
+    p.urgencia = urgenciaDespacho(p.limite_despacho, ahora);
 
   const ORDEN = ["Flex", "Mercado Envíos", "Full", "Otro"];
   const lista = [...paquetes.values()].sort(
     (a, b) =>
       ORDEN.indexOf(a.etiqueta_logistica) - ORDEN.indexOf(b.etiqueta_logistica) ||
+      (a.limite_despacho ?? "9999").localeCompare(b.limite_despacho ?? "9999") ||
       a.fecha.localeCompare(b.fecha),
   );
   const conteos: Record<string, number> = {};

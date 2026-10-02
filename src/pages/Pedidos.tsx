@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Badge, Card, EmptyHint, GhostButton, PageHeader, PrimaryButton, cx } from "@/components/ui";
+import { MensajesVenta } from "@/components/MensajesVenta";
 import { api, useApi } from "@/lib/api";
 import { diaCorto, formatARS } from "@/lib/format";
 
@@ -31,6 +32,8 @@ interface Paquete {
   urgencia: "vencido" | "hoy" | "despues" | "sin_fecha";
   entrega_acordada: boolean;
   ml_order_ids: string[];
+  pack_id: string;
+  mensaje_nuevo: boolean;
 }
 interface PedidosResp {
   paquetes: Paquete[];
@@ -380,6 +383,7 @@ function FilaPaquete({
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2 pl-6 sm:gap-4 sm:pl-0">
+          {p.mensaje_nuevo && <Badge tono="info">Mensaje nuevo</Badge>}
           <Plazo paquete={p} />
           {p.faltantes > 0 ? (
             <Badge tono="danger">Completar {p.faltantes}</Badge>
@@ -414,6 +418,7 @@ function FilaPaquete({
             />
           ))}
           {p.entrega_acordada && <MarcarEntregado paquete={p} onListo={onRecargar} />}
+          <MensajesVenta packId={p.pack_id} comprador={p.comprador} nuevo={p.mensaje_nuevo} />
         </ul>
       )}
     </div>

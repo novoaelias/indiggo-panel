@@ -3,6 +3,7 @@ import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { mlFetch } from "../lib/ml";
 import { descontarPorDespacho, syncEnvio, syncOneItem } from "../lib/sync";
+import { packsSinLeer } from "../lib/mensajes";
 import { sheetsConfigurado, sheetsSuspendido } from "../lib/sheets";
 import { resolverAlertaManual, sincronizarStockML } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
@@ -642,6 +643,9 @@ panel.get("/pedidos-activos", async (c) => {
     urgencia: UrgenciaDespacho;
     entrega_acordada: boolean;
     ml_order_ids: string[];
+    /** Conversación de la venta en ML: pack_id, o el pedido si no vino en pack. */
+    pack_id: string;
+    mensaje_nuevo: boolean;
   }
   const paquetes = new Map<string, Paquete>();
   for (const o of activos) {
@@ -681,12 +685,17 @@ panel.get("/pedidos-activos", async (c) => {
         urgencia: "sin_fecha",
         entrega_acordada: acordada,
         ml_order_ids: [o.ml_order_id],
+        pack_id: String((o.raw as { pack_id?: unknown } | null)?.pack_id ?? o.ml_order_id),
+        mensaje_nuevo: false,
       });
     }
   }
   const ahora = new Date();
-  for (const p of paquetes.values())
+  const sinLeer = paquetes.size ? await packsSinLeer(c.env, db) : new Set<string>();
+  for (const p of paquetes.values()) {
     p.urgencia = urgenciaDespacho(p.limite_despacho, ahora);
+    p.mensaje_nuevo = sinLeer.has(p.pack_id);
+  }
 
   const ORDEN = ["Flex", "Mercado Envíos", "A acordar", "Full", "Otro"];
   const lista = [...paquetes.values()].sort(

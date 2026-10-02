@@ -826,6 +826,7 @@ export type Database = {
           comision_ml: number | null
           comprador: string | null
           created_at: string
+          envio_limite_despacho: string | null
           envio_substatus: string | null
           envio_sync_at: string | null
           envio_vendedor: number | null
@@ -847,6 +848,7 @@ export type Database = {
           comision_ml?: number | null
           comprador?: string | null
           created_at?: string
+          envio_limite_despacho?: string | null
           envio_substatus?: string | null
           envio_sync_at?: string | null
           envio_vendedor?: number | null
@@ -868,6 +870,7 @@ export type Database = {
           comision_ml?: number | null
           comprador?: string | null
           created_at?: string
+          envio_limite_despacho?: string | null
           envio_substatus?: string | null
           envio_sync_at?: string | null
           envio_vendedor?: number | null

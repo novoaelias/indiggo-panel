@@ -159,7 +159,11 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
   later day, e.g. paid Friday after the cut-off → Monday). The deadline is `expected_date` of
   `GET /shipments/{id}/sla`, stored by `syncEnvio` in `ml_orders.envio_limite_despacho` while
   the shipment is still in the workshop; `urgenciaDespacho` (`worker/lib/envios.ts`) compares
-  it by Argentina day. The "ya está en la bolsa" ticks are a per-browser packing aid in
+  it by Argentina day. Sales where the buyer chose "acordar con el vendedor" (order tag
+  `no_shipping`, no shipment) get their own section "Retiro o entrega a acordar": ML never
+  marks them dispatched, so they stay pending until the owner taps "Ya lo entregué"
+  (`POST /api/pedidos/:id/despachar` → `descontarPorDespacho`), which sets
+  `stock_descontado_at` and hides them. The "ya está en la bolsa" ticks are a per-browser packing aid in
   `localStorage` (`pedidos:armados`) and never touch stock.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.

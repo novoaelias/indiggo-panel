@@ -1,3 +1,5 @@
+import { hoyAR } from "./fecha";
+
 // Tipo de logística de Mercado Libre → etiqueta que entiende Elias.
 //   self_service                       → Flex (lo despacha él, retiro a domicilio)
 //   fulfillment                        → Full (ML tiene el stock)
@@ -45,4 +47,38 @@ export function pedidoActivo(o: {
   if (Array.isArray(tags) && (tags.includes("delivered") || tags.includes("no_shipping")))
     return false;
   return !o.estado_envio || !ENVIO_TERMINADO.has(o.estado_envio);
+}
+
+// Estados del shipment en los que todavía corre el plazo de despacho.
+const ENVIO_POR_DESPACHAR = new Set(["pending", "handling", "ready_to_ship"]);
+
+/** ¿Tiene sentido pedir el plazo de despacho (`/sla`) de este envío? Full no:
+ *  ese lo despacha ML. */
+export function esperaDespacho(
+  status: string | null | undefined,
+  logisticType: string | null | undefined,
+): boolean {
+  return !!status && ENVIO_POR_DESPACHAR.has(status) && logisticType !== "fulfillment";
+}
+
+/**
+ * Qué tan apurado está un paquete según la fecha límite de despacho de ML:
+ *   vencido    → el plazo ya pasó (ML ya lo cuenta como demorado)
+ *   hoy        → vence hoy: sale hoy sí o sí
+ *   despues    → vence otro día (el próximo hábil o más adelante)
+ *   sin_fecha  → ML no informó plazo (Full, o todavía no se sincronizó)
+ * Se compara por día en horario de Argentina, no por hora: ML pone el corte a
+ * las 23:59:59 del día límite.
+ */
+export type UrgenciaDespacho = "vencido" | "hoy" | "despues" | "sin_fecha";
+
+export function urgenciaDespacho(
+  limite: string | null | undefined,
+  ahora: Date = new Date(),
+): UrgenciaDespacho {
+  if (!limite) return "sin_fecha";
+  const fin = new Date(limite);
+  if (Number.isNaN(fin.getTime())) return "sin_fecha";
+  if (fin.getTime() < ahora.getTime()) return "vencido";
+  return hoyAR(fin) === hoyAR(ahora) ? "hoy" : "despues";
 }

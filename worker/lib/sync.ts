@@ -7,7 +7,7 @@ import { getToken, mlFetch } from "./ml";
 import { regenerarAlertas } from "./alertas";
 import { derivarCatalogo } from "./derivar";
 import { appendEnvioFlex, sheetsConfigurado } from "./sheets";
-import { envioTerminado } from "./envios";
+import { envioTerminado, esperaDespacho } from "./envios";
 import { fechaRepartoAR } from "./fecha";
 import { sincronizarStockML } from "./stock";
 import { syncNeto } from "./neto";
@@ -361,6 +361,17 @@ export async function syncEnvio(
   const res = await mlFetch(env, db, `/shipments/${ref.shippingId}`);
   if (!res.ok) return; // envíos Full o sin permiso: se ignora en silencio
   const s = (await res.json()) as MlShipment;
+  // Hasta cuándo hay que despacharlo sin que ML lo cuente como demorado: es lo
+  // que separa en Pedidos "sale hoy sí o sí" de "puede esperar". Sólo mientras
+  // el envío sigue en el taller; si /sla falla se conserva el valor anterior.
+  let limite: string | undefined;
+  if (esperaDespacho(s.status, s.logistic_type)) {
+    const sla = await mlFetch(env, db, `/shipments/${ref.shippingId}/sla`).catch(() => null);
+    if (sla?.ok) {
+      const d = ((await sla.json()) as { expected_date?: string | null }).expected_date;
+      if (d) limite = d;
+    }
+  }
   await db
     .from("ml_orders")
     .update({
@@ -368,6 +379,7 @@ export async function syncEnvio(
       estado_envio: s.status ?? null,
       envio_substatus: s.substatus ?? null,
       envio_sync_at: new Date().toISOString(),
+      ...(limite ? { envio_limite_despacho: limite } : {}),
     } as Database["public"]["Tables"]["ml_orders"]["Update"])
     .eq("id", ref.id);
 

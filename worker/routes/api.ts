@@ -8,6 +8,7 @@ import { ia } from "./ia";
 import { inventario } from "./inventario";
 import { ml } from "./ml";
 import { panel } from "./panel";
+import { mensajes } from "./mensajes";
 import { preguntas } from "./preguntas";
 import { seo } from "./seo";
 
@@ -65,6 +66,7 @@ api.route("/contenido", contenido);
 api.route("/fotos", fotos);
 api.route("/ml", ml);
 api.route("/ia", ia);
+api.route("/mensajes", mensajes);
 api.route("/inventario", inventario);
 api.route("/preguntas", preguntas);
 api.route("/seo", seo);

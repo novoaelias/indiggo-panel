@@ -84,6 +84,11 @@ export function firmar(
  *  emojis, porque sale sin que nadie la lea. */
 export type ModoRedaccion = "automatica" | "comercial";
 
+/** Jerga que el modelo no puede usar al escribir por la tienda (respuestas
+ *  públicas y mensajes de las ventas). */
+export const MULETILLAS =
+  '"dale", "buena onda", "genial", "joya", "posta", "obvio", "tranqui", "che"';
+
 export function guiaDeRedaccion(
   estilo: EstiloTienda,
   modo: ModoRedaccion = "automatica",
@@ -92,8 +97,7 @@ export function guiaDeRedaccion(
     estilo.trato === "usted"
       ? "Tratá de usted al comprador."
       : "Tratá de vos al comprador, como se habla en Buenos Aires.";
-  const muletillas =
-    '"dale", "buena onda", "genial", "joya", "posta", "obvio", "tranqui", "che"';
+  const muletillas = MULETILLAS;
   const reglasDelModo =
     modo === "comercial"
       ? [

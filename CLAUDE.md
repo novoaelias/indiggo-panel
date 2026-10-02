@@ -154,7 +154,12 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
 - **Pedidos** (`GET /api/pedidos-activos`): one row per ML shipment/pack, collapsed by default;
   expanding it lists each item with internal product name, variant (hidden when "Único" or
   "a elección"), listing thumbnail and what goes in the bag: the variant's recipe times the
-  quantity bought. The "ya está en la bolsa" ticks are a per-browser packing aid in
+  quantity bought. The screen is split by ML's dispatch deadline: "Despachar hoy sí o sí"
+  (overdue or due today, ML penalizes reputation otherwise) and "Pueden esperar" (due on a
+  later day, e.g. paid Friday after the cut-off → Monday). The deadline is `expected_date` of
+  `GET /shipments/{id}/sla`, stored by `syncEnvio` in `ml_orders.envio_limite_despacho` while
+  the shipment is still in the workshop; `urgenciaDespacho` (`worker/lib/envios.ts`) compares
+  it by Argentina day. The "ya está en la bolsa" ticks are a per-browser packing aid in
   `localStorage` (`pedidos:armados`) and never touch stock.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.

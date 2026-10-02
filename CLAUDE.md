@@ -163,7 +163,17 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
   `no_shipping`, no shipment) get their own section "Retiro o entrega a acordar": ML never
   marks them dispatched, so they stay pending until the owner taps "Ya lo entregué"
   (`POST /api/pedidos/:id/despachar` → `descontarPorDespacho`), which sets
-  `stock_descontado_at` and hides them. The "ya está en la bolsa" ticks are a per-browser packing aid in
+  `stock_descontado_at` and hides them. Each package also carries its post-sale chat
+  (`worker/lib/mensajes.ts`, `worker/routes/mensajes.ts` at `/api/mensajes/:pack`, UI in
+  `src/components/MensajesVenta.tsx`), keyed by `pack_id` or the order id when there is no
+  pack; a route only acts on a pack that belongs to a stored sale. ML keeps Mercado Envíos
+  chats blocked (`blocked_by_conversation_initiated_by_seller_limited`) until the buyer writes:
+  the seller can only open them through the action guide, with the REQUEST_VARIANTS template
+  or one free-text OTHER message of 350 chars. "Redactar mejor" (`redactarMensaje`, Sonnet)
+  follows the same propose-then-confirm rule as Preguntas but writes for a private chat:
+  respects the char cap, no store signature, never infers the buyer's name from the ML
+  nickname. Reading uses `mark_as_read=false`; sending marks the chat read, which clears the
+  "Mensaje nuevo" badge (`/messages/unread`). The "ya está en la bolsa" ticks are a per-browser packing aid in
   `localStorage` (`pedidos:armados`) and never touch stock.
 - **Alerts** (Inicio screen): `worker/lib/alertas.ts` `regenerarAlertas` fully rebuilds the
   auto-generated `alerts` rows at the end of each sync; rows with `resuelta_at` set are kept.

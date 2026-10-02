@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Badge, Card, EmptyHint, GhostButton, PageHeader, cx } from "@/components/ui";
+import { Badge, Card, EmptyHint, GhostButton, PageHeader, PrimaryButton, cx } from "@/components/ui";
 import { api, useApi } from "@/lib/api";
 import { diaCorto, formatARS } from "@/lib/format";
 
@@ -29,6 +29,8 @@ interface Paquete {
   a_imprimir: boolean;
   limite_despacho: string | null;
   urgencia: "vencido" | "hoy" | "despues" | "sin_fecha";
+  entrega_acordada: boolean;
+  ml_order_ids: string[];
 }
 interface PedidosResp {
   paquetes: Paquete[];
@@ -36,7 +38,7 @@ interface PedidosResp {
   total: number;
 }
 
-const ORDEN = ["Flex", "Mercado Envíos", "Full", "Otro"];
+const ORDEN = ["Flex", "Mercado Envíos", "A acordar", "Full", "Otro"];
 
 /** Dentro de cada sección, un bloque por tipo de logística (Flex primero). */
 function agruparPorLogistica(paquetes: Paquete[]): Array<[string, Paquete[]]> {
@@ -51,10 +53,11 @@ function agruparPorLogistica(paquetes: Paquete[]): Array<[string, Paquete[]]> {
 /** Lo vencido y lo que vence hoy sale hoy sí o sí: si no, ML penaliza la
  *  reputación. Lo demás puede esperar al día que marca ML. */
 function esUrgente(p: Paquete): boolean {
-  return p.urgencia === "vencido" || p.urgencia === "hoy";
+  return !p.entrega_acordada && (p.urgencia === "vencido" || p.urgencia === "hoy");
 }
 
 function Plazo({ paquete: p }: { paquete: Paquete }) {
+  if (p.entrega_acordada) return <Badge tono="info">Acordar entrega</Badge>;
   if (p.urgencia === "vencido")
     return (
       <Badge tono="danger">
@@ -161,7 +164,8 @@ export function Pedidos() {
   const secciones = useMemo(() => {
     const paquetes = data?.paquetes ?? [];
     const urgentes = paquetes.filter(esUrgente);
-    const resto = paquetes.filter((p) => !esUrgente(p));
+    const acordar = paquetes.filter((p) => p.entrega_acordada);
+    const resto = paquetes.filter((p) => !p.entrega_acordada && !esUrgente(p));
     return {
       urgentes,
       grupos: [
@@ -176,6 +180,13 @@ export function Pedidos() {
           titulo: "Pueden esperar",
           detalle: "Vencen otro día: se pueden despachar hoy o hasta la fecha que marca cada uno.",
           grupos: agruparPorLogistica(resto),
+        },
+        {
+          id: "acordar",
+          titulo: "Retiro o entrega a acordar",
+          detalle:
+            "El comprador eligió acordar con vos: ML no pone plazo ni hay etiqueta. Cuando lo entregues, marcalo para descontar el stock.",
+          grupos: agruparPorLogistica(acordar),
         },
       ].filter((s) => s.grupos.length > 0),
     };
@@ -250,7 +261,11 @@ export function Pedidos() {
               <div
                 className={cx(
                   "mb-4 border-l-[3px] pl-3",
-                  seccion.id === "hoy" ? "border-danger" : "border-ink/15",
+                  seccion.id === "hoy"
+                    ? "border-danger"
+                    : seccion.id === "acordar"
+                      ? "border-accent"
+                      : "border-ink/15",
                 )}
               >
                 <div className="flex items-center gap-2.5">
@@ -371,7 +386,7 @@ function FilaPaquete({
           ) : (
             <Badge tono="ok">Stock reservado</Badge>
           )}
-          {p.a_imprimir ? (
+          {p.entrega_acordada ? null : p.a_imprimir ? (
             <Badge tono="warn">Imprimir etiqueta</Badge>
           ) : (
             <span
@@ -398,6 +413,7 @@ function FilaPaquete({
               onRecargar={onRecargar}
             />
           ))}
+          {p.entrega_acordada && <MarcarEntregado paquete={p} onListo={onRecargar} />}
         </ul>
       )}
     </div>
@@ -464,6 +480,38 @@ function ItemDelPaquete({
           </div>
         )}
       </div>
+    </li>
+  );
+}
+
+/** Los pedidos "a acordar" no tienen envío en ML: los da por entregados Elias,
+ *  y eso descuenta el stock de la venta (una sola vez, igual que un despacho). */
+function MarcarEntregado({ paquete: p, onListo }: { paquete: Paquete; onListo: () => void }) {
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError] = useState<string>();
+  return (
+    <li className="flex flex-wrap items-center gap-3 pt-1">
+      <PrimaryButton
+        disabled={guardando}
+        onClick={async () => {
+          if (!confirm(`¿Ya le entregaste el pedido a ${p.comprador ?? "este comprador"}? Se descuenta el stock.`))
+            return;
+          setGuardando(true);
+          setError(undefined);
+          try {
+            for (const id of p.ml_order_ids)
+              await api(`/pedidos/${id}/despachar`, { method: "POST" });
+            onListo();
+          } catch (err) {
+            setError((err as Error).message);
+          } finally {
+            setGuardando(false);
+          }
+        }}
+      >
+        {guardando ? "Guardando…" : "Ya lo entregué"}
+      </PrimaryButton>
+      {error && <span className="text-[12px] text-danger">{error}</span>}
     </li>
   );
 }

@@ -8,6 +8,7 @@ import { resolverAlertaManual, sincronizarStockML } from "../lib/stock";
 import { regenerarAlertas } from "../lib/alertas";
 import { inicioDiaAR, inicioDiaARHace } from "../lib/fecha";
 import {
+  entregaAcordada,
   etiquetaLogistica,
   pedidoActivo,
   urgenciaDespacho,
@@ -492,7 +493,7 @@ panel.get("/pedidos-activos", async (c) => {
   const { data: orders, error } = await db
     .from("ml_orders")
     .select(
-      "id, ml_order_id, comprador, fecha, total, estado, estado_envio, envio_substatus, logistic_type, envio_limite_despacho, raw",
+      "id, ml_order_id, comprador, fecha, total, estado, estado_envio, envio_substatus, logistic_type, envio_limite_despacho, stock_descontado_at, raw",
     )
     .eq("estado", "paid")
     .gte("fecha", inicioDiaARHace(45))
@@ -500,7 +501,12 @@ panel.get("/pedidos-activos", async (c) => {
   if (error) return c.json({ error: error.message }, 500);
 
   const activos = (orders ?? []).filter((o) =>
-    pedidoActivo({ estado: o.estado, estado_envio: o.estado_envio, raw: o.raw }),
+    pedidoActivo({
+      estado: o.estado,
+      estado_envio: o.estado_envio,
+      raw: o.raw,
+      stock_descontado_at: o.stock_descontado_at,
+    }),
   );
 
   const { data: items } = await db
@@ -634,15 +640,19 @@ panel.get("/pedidos-activos", async (c) => {
     a_imprimir: boolean;
     limite_despacho: string | null;
     urgencia: UrgenciaDespacho;
+    entrega_acordada: boolean;
+    ml_order_ids: string[];
   }
   const paquetes = new Map<string, Paquete>();
   for (const o of activos) {
     const key = shipId(o);
-    const eti = etiquetaLogistica(o.logistic_type);
+    const acordada = entregaAcordada(o.raw);
+    const eti = acordada ? "A acordar" : etiquetaLogistica(o.logistic_type);
     const cur = paquetes.get(key);
     const its = itemsPorPedido.get(o.id) ?? [];
     if (cur) {
       cur.total += o.total ?? 0;
+      cur.ml_order_ids.push(o.ml_order_id);
       cur.items.push(...its);
       cur.faltantes += its.reduce((sum, item) => sum + item.faltante, 0);
       if (o.fecha < cur.fecha) cur.fecha = o.fecha;
@@ -664,10 +674,13 @@ panel.get("/pedidos-activos", async (c) => {
         envio_substatus: o.envio_substatus,
         etiqueta_logistica: eti,
         a_imprimir:
-          o.envio_substatus === "ready_to_print" ||
-          o.estado_envio === "ready_to_ship",
+          !acordada &&
+          (o.envio_substatus === "ready_to_print" ||
+            o.estado_envio === "ready_to_ship"),
         limite_despacho: o.envio_limite_despacho,
         urgencia: "sin_fecha",
+        entrega_acordada: acordada,
+        ml_order_ids: [o.ml_order_id],
       });
     }
   }
@@ -675,7 +688,7 @@ panel.get("/pedidos-activos", async (c) => {
   for (const p of paquetes.values())
     p.urgencia = urgenciaDespacho(p.limite_despacho, ahora);
 
-  const ORDEN = ["Flex", "Mercado Envíos", "Full", "Otro"];
+  const ORDEN = ["Flex", "Mercado Envíos", "A acordar", "Full", "Otro"];
   const lista = [...paquetes.values()].sort(
     (a, b) =>
       ORDEN.indexOf(a.etiqueta_logistica) - ORDEN.indexOf(b.etiqueta_logistica) ||
@@ -822,7 +835,14 @@ panel.post("/pedidos/:id/despachar", async (c) => {
     .maybeSingle();
   if (!o) return c.json({ error: "pedido no encontrado" }, 404);
 
-  const { ya, aplicados, avisos } = await descontarPorDespacho(db, o.id);
+  let resultado: Awaited<ReturnType<typeof descontarPorDespacho>>;
+  try {
+    resultado = await descontarPorDespacho(db, o.id);
+  } catch (e) {
+    // Ej. faltan piezas: el pedido queda pendiente y se avisa por qué.
+    return c.json({ error: `No se pudo descontar el stock: ${(e as Error).message}` }, 409);
+  }
+  const { ya, aplicados, avisos } = resultado;
   if (ya) return c.json({ ok: true, ya: true, aplicados: 0, avisos: [] });
   await sincronizarStockML(c.env, db, {
     onItemTocado: (it) => syncOneItem(c.env, db, it).catch(() => {}),

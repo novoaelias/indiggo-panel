@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { esperaDespacho, urgenciaDespacho } from "../worker/lib/envios";
+import {
+  entregaAcordada,
+  esperaDespacho,
+  pedidoActivo,
+  urgenciaDespacho,
+} from "../worker/lib/envios";
 
 // Viernes 2/10/2026, 14:00 en Argentina (17:00 UTC).
 const viernes = new Date("2026-10-02T17:00:00Z");
@@ -35,5 +40,29 @@ describe("plazo de despacho de ML (Pedidos: hoy sí o sí / puede esperar)", () 
     expect(esperaDespacho("shipped", "drop_off")).toBe(false);
     expect(esperaDespacho("ready_to_ship", "fulfillment")).toBe(false);
     expect(esperaDespacho(null, "drop_off")).toBe(false);
+  });
+});
+
+describe("ventas a acordar con el vendedor (sin envío de ML)", () => {
+  const acordada = { tags: ["no_shipping", "paid", "not_delivered"] };
+
+  it("se reconocen por el tag no_shipping", () => {
+    expect(entregaAcordada(acordada)).toBe(true);
+    expect(entregaAcordada({ tags: ["paid"] })).toBe(false);
+    expect(entregaAcordada(null)).toBe(false);
+  });
+
+  // Antes se ocultaban: la venta quedaba con stock reservado y sin aparecer en Pedidos.
+  it("siguen pendientes hasta que se marcan como entregadas", () => {
+    const base = { estado: "paid", estado_envio: null, raw: acordada };
+    expect(pedidoActivo(base)).toBe(true);
+    expect(pedidoActivo({ ...base, stock_descontado_at: "2026-10-02T15:00:00Z" })).toBe(false);
+  });
+
+  it("si ML ya la da por entregada o no está paga, no es pendiente", () => {
+    expect(
+      pedidoActivo({ estado: "paid", estado_envio: null, raw: { tags: ["no_shipping", "delivered"] } }),
+    ).toBe(false);
+    expect(pedidoActivo({ estado: "cancelled", estado_envio: null, raw: acordada })).toBe(false);
   });
 });

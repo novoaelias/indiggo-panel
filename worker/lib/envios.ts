@@ -4,7 +4,8 @@ import { hoyAR } from "./fecha";
 //   self_service                       → Flex (lo despacha él, retiro a domicilio)
 //   fulfillment                        → Full (ML tiene el stock)
 //   cross_docking / drop_off / xd_*    → Mercado Envíos (lo lleva a un punto / correo)
-export type EtiquetaLogistica = "Flex" | "Mercado Envíos" | "Full" | "Otro";
+//   pedido sin envío (tag no_shipping)  → A acordar (retiro en su casa o entrega coordinada)
+export type EtiquetaLogistica = "Flex" | "Mercado Envíos" | "Full" | "A acordar" | "Otro";
 
 export function etiquetaLogistica(
   logisticType: string | null | undefined,
@@ -36,16 +37,29 @@ export function envioTerminado(status: string | null | undefined): boolean {
   return !!status && ENVIO_TERMINADO.has(status);
 }
 
+function tagsDelPedido(raw: unknown): unknown[] {
+  const tags = (raw as { tags?: unknown } | null)?.tags;
+  return Array.isArray(tags) ? tags : [];
+}
+
+/** ¿El comprador eligió "acordar con el vendedor" (retiro o entrega a
+ *  coordinar)? Esos pedidos no tienen shipment en ML. */
+export function entregaAcordada(raw: unknown): boolean {
+  return tagsDelPedido(raw).includes("no_shipping");
+}
+
 /** ¿El pedido está pago y todavía sin despachar? */
 export function pedidoActivo(o: {
   estado: string | null;
   estado_envio: string | null;
   raw: unknown;
+  stock_descontado_at?: string | null;
 }): boolean {
   if (o.estado !== "paid") return false;
-  const tags = (o.raw as { tags?: unknown })?.tags;
-  if (Array.isArray(tags) && (tags.includes("delivered") || tags.includes("no_shipping")))
-    return false;
+  if (tagsDelPedido(o.raw).includes("delivered")) return false;
+  // Sin envío no hay shipment que ML marque como despachado: sigue pendiente
+  // hasta que Elias lo da por entregado desde Pedidos (eso descuenta el stock).
+  if (entregaAcordada(o.raw)) return !o.stock_descontado_at;
   return !o.estado_envio || !ENVIO_TERMINADO.has(o.estado_envio);
 }
 

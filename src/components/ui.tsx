@@ -61,7 +61,7 @@ export function PrimaryButton({
       type="button"
       {...props}
       onClick={onClick}
-      className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white transition-colors hover:bg-accent-hover"
+      className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
@@ -78,7 +78,7 @@ export function GhostButton({
       type="button"
       {...props}
       onClick={onClick}
-      className="rounded-[9px] border border-ink/12 px-4 py-2.5 text-[13.5px] font-semibold text-ink transition-colors hover:bg-ink/[0.03]"
+      className="rounded-[9px] border border-ink/12 px-4 py-2.5 text-[13.5px] font-semibold text-ink transition-colors hover:bg-ink/[0.03] disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>

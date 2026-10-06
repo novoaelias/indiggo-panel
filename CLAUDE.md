@@ -81,6 +81,10 @@ other path serves the SPA. Entry point `worker/index.ts` = `fetch` (Hono app, `w
    product's real variants. `allocateAssemblySuggestions` (`worker/lib/inventory-logic.ts`) is the
    honest build plan: it hands out shared pieces once, and `planPiezas` turns what is missing into
    print jobs (rounded to plate fractions) and print-shop orders.
+   `sincronizarStockML` pushes `stock_ml` to every listing that `recibeStock` accepts: active ones
+   **and** ones ML paused only for `out_of_stock` (a sale that empties a listing makes ML pause it;
+   pushing only to active ones left those paused for days). After the push it re-reads the item
+   and, if it is still paused only for stock and on Mercado Envíos without Flex, sets it `active`.
 
 ### Sale → reservation → dispatch
 
@@ -91,8 +95,14 @@ function and `upsertOrder` refuse to reserve when `ml_orders.stock_descontado_at
 without that, every resync would reserve old sales again and free stock would collapse to zero.
 
 At dispatch (`shipment` → `shipped`/`delivered`, non-`fulfillment`), `descontarPorDespacho` calls
-`inventory_fulfill_order`, which consumes the reservation, discounts finished units and, for
-whatever is missing, assembles from pieces inside the same transaction. The once-per-order guard
+`inventory_fulfill_order`, which consumes the reservation, discounts free finished units, then
+assembles from whatever pieces there are, then takes finished units reserved for another sale
+(they physically left). It **never raises** (migration 0033): the package already left, and an
+exception used to roll back, leave the reservation active forever and eat every new manual count
+of that product. What no stock covered is stored in `inventory_operations.meta.sin_stock` and
+shown on Inicio ("salieron sin stock cargado: recontalos") until a later manual adjust of that
+variant. The hourly sync also checks the shipment of `delivered` orders that were never
+discounted, otherwise they kept reserving forever. The once-per-order guard
 is still the **atomic claim** on `ml_orders.stock_descontado_at`
 (`UPDATE ... WHERE <marker> IS NULL RETURNING id`), because ML fires several notifications per
 sale and the cron runs in parallel: a plain check-then-write double-counts. The same pattern

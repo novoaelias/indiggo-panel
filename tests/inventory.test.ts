@@ -7,7 +7,7 @@ import {
   topeEleccion,
 } from "../worker/lib/inventory-logic";
 import { calcBuffer, redondearPlaca } from "../worker/lib/bom";
-import { distribuirStock } from "../worker/lib/stock";
+import { distribuirStock, recibeStock } from "../worker/lib/stock";
 
 describe("inventario físico", () => {
   it("no asigna una pieza compartida a dos productos", () => {
@@ -178,6 +178,19 @@ describe("inventario físico", () => {
       { type: "seller_warehouse", store_id: "b", quantity: 1 },
     ]);
     expect(locations.reduce((sum, x) => sum + Number(x.quantity), 0)).toBe(7);
+  });
+
+  // Una venta que deja la publicación en 0 hace que ML la pause por falta de
+  // stock. Si el panel sólo repone las activas, queda pausada para siempre (le
+  // pasó al holder de Katseye). Una pausa del vendedor no se toca.
+  it("repone las publicaciones que ML pausó sólo por quedarse sin stock", () => {
+    expect(recibeStock("active", [])).toBe(true);
+    expect(recibeStock("paused", ["out_of_stock"])).toBe(true);
+    expect(recibeStock("paused", ["paused_by_seller"])).toBe(false);
+    expect(recibeStock("paused", ["out_of_stock", "paused_by_seller"])).toBe(false);
+    expect(recibeStock("paused", null)).toBe(false);
+    expect(recibeStock("under_review", ["forbidden"])).toBe(false);
+    expect(recibeStock("closed", ["deleted"])).toBe(false);
   });
 
   // Lo que hay que reponer sale de los pedidos pendientes y de los mínimos, y

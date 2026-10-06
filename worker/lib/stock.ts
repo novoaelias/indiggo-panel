@@ -5,6 +5,7 @@ import type { Database } from "@/lib/database.types";
 import type { Env } from "../env";
 import { mlFetch } from "./ml";
 import { calcBuffer, calcMinimo, ventasMulti } from "./bom";
+import { estadoEnvio } from "./shipping";
 import {
   armablesPorReceta,
   disponibleComercial,
@@ -191,8 +192,22 @@ export async function resolverAlertaManual(
 
 // ---------- push automático del buffer de ML (nunca dejar una publicación en 0) ----------
 
+/**
+ * Publicaciones a las que el panel les mantiene el stock: las activas y las que
+ * ML pausó SÓLO porque se quedaron en 0 (`out_of_stock`). Esas últimas son
+ * justamente las que hay que reponer: si se las ignora, una venta que vacía la
+ * publicación la deja pausada para siempre (le pasó al holder de Katseye y al
+ * pack de 110 lila). Una pausada por Elias o por otro motivo de ML no se toca.
+ */
+export function recibeStock(estado: string | null, subStatus: unknown): boolean {
+  if (estado === "active") return true;
+  if (estado !== "paused") return false;
+  const subs = Array.isArray(subStatus) ? subStatus : [];
+  return subs.length > 0 && subs.every((s) => s === "out_of_stock");
+}
+
 /** Cantidad publicada AHORA en ML (mirror), por variante y por producto simple sin
- *  variantes — sólo de publicaciones activas. Se compara contra `stock_ml` para
+ *  variantes — de las publicaciones que reciben stock (`recibeStock`). Se compara contra `stock_ml` para
  *  saber qué hay que empujar. */
 export async function publicadoEnML(db: DB) {
   const [{ data: mlvs }, { data: mls }] = await Promise.all([
@@ -202,11 +217,11 @@ export async function publicadoEnML(db: DB) {
     db
       .from("ml_listings")
       .select(
-        "id, product_id, product_variant_id, cantidad_ml, tiene_variantes, estado",
+        "id, product_id, product_variant_id, cantidad_ml, tiene_variantes, estado, sub_status:raw->sub_status",
       ),
   ]);
   const activas = new Set(
-    (mls ?? []).filter((m) => m.estado === "active").map((m) => m.id),
+    (mls ?? []).filter((m) => recibeStock(m.estado, m.sub_status)).map((m) => m.id),
   );
   const porVar = new Map<string, number[]>();
   for (const v of mlvs ?? []) {
@@ -217,7 +232,7 @@ export async function publicadoEnML(db: DB) {
   }
   const porProd = new Map<string, number[]>();
   for (const m of mls ?? []) {
-    if (m.tiene_variantes || m.estado !== "active") continue;
+    if (m.tiene_variantes || !activas.has(m.id)) continue;
     // Una publicación simple ya ligada a su variante se compara contra esa
     // variante: dentro de un producto puede haber un color por publicación.
     if (m.product_variant_id) {
@@ -234,37 +249,55 @@ export async function publicadoEnML(db: DB) {
   return { porVar, porProd };
 }
 
+/** Una publicación (o variación) de ML a la que se le empuja el stock. */
+interface RefML {
+  itemId: string;
+  variationId: string | null;
+  userProductId: string | null;
+  /** ML la pausó por quedar en 0: después de reponer hay que verificar que
+   *  vuelva a estar activa. */
+  pausadaSinStock: boolean;
+}
+
+function refDesde(
+  l: { ml_item_id?: string | null; estado?: string | null; raw?: unknown } | null,
+  variationId: string | null,
+): RefML | null {
+  if (!l?.ml_item_id) return null;
+  const raw = (l.raw && typeof l.raw === "object" ? l.raw : {}) as {
+    user_product_id?: unknown;
+    inventory_id?: unknown;
+    sub_status?: unknown;
+  };
+  const estado = l.estado ?? null;
+  if (!recibeStock(estado, raw.sub_status)) return null;
+  const userProductId = raw.user_product_id ?? raw.inventory_id;
+  return {
+    itemId: l.ml_item_id,
+    variationId,
+    userProductId: userProductId ? String(userProductId) : null,
+    pausadaSinStock: estado !== "active",
+  };
+}
+
 /** Resuelve una variante interna a TODAS sus publicaciones/variaciones de ML
- *  ACTIVAS. Una variante puede corresponder a varias publicaciones (grupo de
- *  publicaciones duplicadas por cuotas): el buffer se publica a todas. */
-async function resolverMLTodas(
-  db: DB,
-  variantId: string,
-): Promise<Array<{ itemId: string; variationId: string | null; userProductId: string | null }>> {
+ *  que reciben stock (`recibeStock`). Una variante puede corresponder a varias
+ *  publicaciones (grupo de publicaciones duplicadas por cuotas): el buffer se
+ *  publica a todas. */
+async function resolverMLTodas(db: DB, variantId: string): Promise<RefML[]> {
   const { data: mlvs } = await db
     .from("ml_listing_variations")
     .select("ml_variation_id, ml_listings(ml_item_id, estado, raw)")
     .eq("product_variant_id", variantId);
 
   const refs = (mlvs ?? [])
-    .map((v) => {
-      const l = v.ml_listings as
-        | { ml_item_id?: string; estado?: string; raw?: unknown }
-        | null;
-      const raw = (l?.raw && typeof l.raw === "object" ? l.raw : {}) as {
-        user_product_id?: unknown;
-        inventory_id?: unknown;
-      };
-      const userProductId = raw.user_product_id ?? raw.inventory_id;
-      return l?.ml_item_id && l.estado === "active"
-        ? {
-            itemId: l.ml_item_id,
-            variationId: v.ml_variation_id,
-            userProductId: userProductId ? String(userProductId) : null,
-          }
-        : null;
-    })
-    .filter((x): x is { itemId: string; variationId: string; userProductId: string | null } => x != null);
+    .map((v) =>
+      refDesde(
+        v.ml_listings as { ml_item_id?: string; estado?: string; raw?: unknown } | null,
+        v.ml_variation_id,
+      ),
+    )
+    .filter((x): x is RefML => x != null);
   if (refs.length) return refs;
 
   // Publicaciones sin variaciones ligadas a ESTA variante. Un producto puede
@@ -272,9 +305,9 @@ async function resolverMLTodas(
   // que empujar por producto haría que un color pisara el stock del otro.
   const { data: propias } = await db
     .from("ml_listings")
-    .select("ml_item_id,raw")
+    .select("ml_item_id,estado,raw")
     .eq("product_variant_id", variantId)
-    .eq("estado", "active");
+    .in("estado", ["active", "paused"]);
 
   let mls = propias ?? [];
   if (!mls.length) {
@@ -288,24 +321,54 @@ async function resolverMLTodas(
     if (!pv) return [];
     const { data: sueltas } = await db
       .from("ml_listings")
-      .select("ml_item_id,raw")
+      .select("ml_item_id,estado,raw")
       .eq("product_id", pv.product_id)
-      .eq("estado", "active")
+      .in("estado", ["active", "paused"])
       .is("product_variant_id", null);
     mls = sueltas ?? [];
   }
-  return mls.map((m) => {
-    const raw = (m.raw && typeof m.raw === "object" ? m.raw : {}) as {
-      user_product_id?: unknown;
-      inventory_id?: unknown;
-    };
-    const userProductId = raw.user_product_id ?? raw.inventory_id;
-    return {
-      itemId: m.ml_item_id,
-      variationId: null,
-      userProductId: userProductId ? String(userProductId) : null,
-    };
+  return mls.map((m) => refDesde(m, null)).filter((x): x is RefML => x != null);
+}
+
+/**
+ * ML suele reactivar sola una publicación pausada por falta de stock cuando
+ * vuelve a tener cantidad, pero no siempre lo hace al instante (y con User
+ * Products a veces no lo hace). Si sigue pausada SÓLO por `out_of_stock`, se
+ * reactiva explícitamente, siempre que siga en Mercado Envíos sin Flex.
+ * Devuelve un error legible o null.
+ */
+async function reactivarSiPausadaSinStock(
+  env: Env,
+  db: DB,
+  itemId: string,
+): Promise<string | null> {
+  const r = await mlFetch(
+    env,
+    db,
+    `/items/${itemId}?attributes=id,status,sub_status,shipping`,
+  );
+  if (!r.ok) return `${itemId}: no se pudo leer para reactivar (${r.status})`;
+  const item = (await r.json()) as Parameters<typeof estadoEnvio>[0] & {
+    status?: string;
+    sub_status?: unknown;
+  };
+  if (item?.status === "active") return null;
+  if (!recibeStock(item?.status ?? null, item?.sub_status)) return null;
+  const envio = estadoEnvio(item);
+  if (!envio.ok) return `${itemId}: no se reactiva, ${envio.detalle ?? "envío sin verificar"}`;
+  const put = await mlFetch(env, db, `/items/${itemId}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status: "active" }),
   });
+  if (put.ok) return null;
+  const error = (await put.text()).slice(0, 100);
+  // ML reactiva sola en segundo plano: si ganó la carrera, el PUT rebota con
+  // item.status.invalid pero la publicación ya está activa.
+  const despues = await mlFetch(env, db, `/items/${itemId}?attributes=id,status`);
+  if (despues.ok && ((await despues.json()) as { status?: string }).status === "active")
+    return null;
+  return `${itemId}: no se pudo reactivar: ${error}`;
 }
 
 interface StockLocation {
@@ -430,6 +493,7 @@ export async function sincronizarStockML(
   let ok = 0;
   const errores: string[] = [];
   const itemsTocados = new Set<string>();
+  const aReactivar = new Set<string>();
   const userProductsEnCurso = new Map<
     string,
     Promise<{ handled: boolean; ok: boolean; error?: string }>
@@ -451,6 +515,7 @@ export async function sincronizarStockML(
           if (up.ok) {
             algunoOk = true;
             itemsTocados.add(ref.itemId);
+            if (ref.pausadaSinStock && v.stock_ml > 0) aReactivar.add(ref.itemId);
           } else {
             errores.push(`${ref.userProductId}: ${up.error ?? "no se pudo actualizar"}`);
           }
@@ -468,6 +533,7 @@ export async function sincronizarStockML(
       if (r.ok) {
         algunoOk = true;
         itemsTocados.add(ref.itemId);
+        if (ref.pausadaSinStock && v.stock_ml > 0) aReactivar.add(ref.itemId);
       } else {
         errores.push(`${ref.itemId}: ${(await r.text()).slice(0, 100)}`);
       }
@@ -478,6 +544,14 @@ export async function sincronizarStockML(
   const lote = pendientes.slice(0, 80);
   for (let i = 0; i < lote.length; i += 5)
     await Promise.all(lote.slice(i, i + 5).map(empujar));
+
+  // Recién después de reponer: ML no reactiva una publicación que sigue en 0.
+  for (const itemId of aReactivar) {
+    const error = await reactivarSiPausadaSinStock(env, db, itemId).catch(
+      (e) => `${itemId}: ${(e as Error).message}`,
+    );
+    if (error) errores.push(error);
+  }
 
   if (opts?.onItemTocado) {
     for (const it of itemsTocados) {

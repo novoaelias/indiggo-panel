@@ -89,6 +89,59 @@ export async function regenerarAlertas(db: DB): Promise<number> {
       detalle: pausadas.slice(0, 3).map((l) => l.titulo).join(" · "),
     });
 
+  // --- ventas que salieron sin stock cargado ---
+  // El despacho nunca falla (si ML dice que salió, salió), pero cuando no había
+  // terminados ni piezas cargados lo anota en `meta.sin_stock`. El número de ese
+  // producto ya no es confiable hasta que Elias lo recuente: la alerta se va
+  // sola con el primer ajuste manual posterior al despacho.
+  const desde = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+  const [{ data: sinCargar }, { data: ajustes }] = await Promise.all([
+    db
+      .from("inventory_operations")
+      .select("created_at, meta")
+      .eq("tipo", "despacho")
+      .not("meta->sin_stock", "is", null)
+      .gte("created_at", desde),
+    db
+      .from("inventory_operations")
+      .select("created_at, inventory_movement_lines(product_variant_id)")
+      .eq("tipo", "ajuste")
+      .gte("created_at", desde),
+  ]);
+  const ultimoAjuste = new Map<string, string>();
+  for (const a of ajustes ?? [])
+    for (const l of a.inventory_movement_lines ?? [])
+      if (l.product_variant_id && a.created_at > (ultimoAjuste.get(l.product_variant_id) ?? ""))
+        ultimoAjuste.set(l.product_variant_id, a.created_at);
+  const aRecontar = new Map<string, number>();
+  for (const op of sinCargar ?? []) {
+    const lineas = (op.meta as { sin_stock?: Array<{ product_variant_id: string; cantidad: number }> } | null)
+      ?.sin_stock ?? [];
+    for (const l of lineas)
+      if ((ultimoAjuste.get(l.product_variant_id) ?? "") < op.created_at)
+        aRecontar.set(l.product_variant_id, (aRecontar.get(l.product_variant_id) ?? 0) + l.cantidad);
+  }
+  if (aRecontar.size) {
+    const { data: nombres } = await db
+      .from("product_variants")
+      .select("id, etiqueta, products(nombre, nombre_interno)")
+      .in("id", [...aRecontar.keys()]);
+    filas.push({
+      tipo: "auto:salio_sin_stock",
+      severidad: "warn",
+      titulo: `${aRecontar.size} producto(s) salieron sin stock cargado: recontalos`,
+      detalle: (nombres ?? [])
+        .slice(0, 4)
+        .map((v) => {
+          const p = v.products as { nombre?: string; nombre_interno?: string | null } | null;
+          const nombre = p?.nombre_interno || p?.nombre || "?";
+          const etiqueta = v.etiqueta && v.etiqueta !== "Único" ? ` (${v.etiqueta})` : "";
+          return `${nombre}${etiqueta}: ${aRecontar.get(v.id)} u.`;
+        })
+        .join(" · "),
+    });
+  }
+
   // --- producción pendiente ---
   try {
     const plan = await planificar(db);

@@ -245,7 +245,12 @@ interface MlShipment {
 async function upsertOrder(
   db: DB,
   o: MlOrder,
-): Promise<{ id: string; shippingId: string | null; netoPendiente: boolean }> {
+): Promise<{
+  id: string;
+  shippingId: string | null;
+  netoPendiente: boolean;
+  stockDescontado: boolean;
+}> {
   const { data: order, error } = await db
     .from("ml_orders")
     .upsert(
@@ -316,6 +321,7 @@ async function upsertOrder(
     id: order.id,
     shippingId,
     netoPendiente: o.status === "paid" && !order.neto_sync_at,
+    stockDescontado: !!order.stock_descontado_at,
   };
 }
 
@@ -631,11 +637,15 @@ async function syncPedidos(
 
     for (const o of page.results) {
       try {
-        const { id, shippingId, netoPendiente } = await upsertOrder(db, o);
+        const { id, shippingId, netoPendiente, stockDescontado } =
+          await upsertOrder(db, o);
         total++;
         if (netoPendiente) sinNeto.push({ id, raw: o });
+        // Una venta entregada ya no cambia de estado, salvo que nunca se haya
+        // descontado: si se la saltea, su reserva queda activa para siempre y
+        // se come cualquier conteo nuevo de ese producto.
         const entregado = (o.tags ?? []).includes("delivered");
-        if (o.status === "paid" && shippingId && !entregado)
+        if (o.status === "paid" && shippingId && (!entregado || !stockDescontado))
           activos.push({ id, shippingId, status: o.status });
         else if (o.status === "cancelled")
           await restaurarSiCancelado(db, id, o.status).catch(() => {});

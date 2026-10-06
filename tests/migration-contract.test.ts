@@ -9,6 +9,10 @@ const reservas = readFileSync(
   new URL("../supabase/migrations/0026_reservas_solo_pendientes.sql", import.meta.url),
   "utf8",
 );
+const despacho = readFileSync(
+  new URL("../supabase/migrations/0033_despacho_nunca_falla.sql", import.meta.url),
+  "utf8",
+);
 const sync = readFileSync(
   new URL("../worker/lib/sync.ts", import.meta.url),
   "utf8",
@@ -32,5 +36,24 @@ describe("contrato transaccional del inventario", () => {
     expect(reservas).toContain("o.stock_descontado_at is null");
     expect(reservas).toMatch(/coalesce\(o\.estado, ''\) = 'paid'/);
     expect(sync).toContain('o.status === "paid" && !order.stock_descontado_at');
+  });
+
+  // Si ML dice que el paquete salió, salió. Una excepción deshacía la
+  // transacción, la reserva quedaba activa para siempre y se comía cada
+  // conteo nuevo del producto ("faltan 5 para pedidos" ya entregados).
+  it("el despacho nunca falla y siempre consume la reserva", () => {
+    const funcion = despacho.slice(
+      despacho.indexOf("create or replace function inventory_fulfill_order"),
+      despacho.indexOf("revoke execute"),
+    );
+    expect(funcion).not.toMatch(/raise exception/i);
+    expect(funcion).toContain("estado='consumida'");
+    expect(funcion).toContain("sin_stock");
+    expect(funcion).toContain("inventory_rebalance_variant");
+  });
+
+  // Una venta entregada que nunca se descontó también pasa por el envío.
+  it("no saltea ventas entregadas que todavía no se descontaron", () => {
+    expect(sync).toContain("(!entregado || !stockDescontado)");
   });
 });

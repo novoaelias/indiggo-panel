@@ -1582,7 +1582,7 @@ function NuevaPublicacionModal({
             )}
 
             {err && <div className="text-[12.5px] text-danger">{err}</div>}
-            <PrimaryButton>
+            <PrimaryButton type="submit" disabled={cargando}>
               {cargando ? "Generando…" : "Generar propuesta"}
             </PrimaryButton>
           </form>

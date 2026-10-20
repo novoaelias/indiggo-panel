@@ -1155,7 +1155,7 @@ function GruposSection() {
               <div className="text-[12.5px] text-danger">{errForm}</div>
             )}
             <div className="flex gap-2.5">
-              <PrimaryButton>
+              <PrimaryButton type="submit" disabled={guardando}>
                 {guardando ? "Guardando…" : "Crear grupo"}
               </PrimaryButton>
               <GhostButton onClick={() => setCreando(false)}>

@@ -1270,6 +1270,318 @@ interface VarianteRow {
   nombre: string;
   fotos: string[];
   stock: string;
+  // id de la fila de la guía de talles asignada a esta variante (moda)
+  talleFila?: string;
+}
+
+interface GuiaTalles {
+  id: string;
+  nombre: string;
+  filas: Array<{ id: string; talle: string }>;
+}
+interface GuiasResp {
+  requiere: boolean;
+  dominio?: string;
+  guias: GuiaTalles[];
+  equivalencias: Array<{ id: string; name: string }>;
+  aviso?: string;
+}
+interface FilaGuiaForm {
+  talle: string;
+  equivalencia: string;
+  pecho: string;
+  ancho: string;
+  largo: string;
+}
+
+const GENERO_DEFECTO = "Sin género";
+const MARCA_DEFECTO = "Indiggo Store";
+const VARS_INICIAL = (): VarianteRow[] => [{ nombre: "", fotos: [], stock: "1" }];
+
+// Borrador del modal, guardado en el servidor (bucket privado "borradores").
+// Sólo el estado que carga el dueño: nada transitorio (cargando, err, gen...).
+interface BorradorNueva {
+  v: 1;
+  desc: string;
+  precioObj: string;
+  fotos: string[];
+  tieneVar: boolean;
+  eje: string;
+  vars: VarianteRow[]; // incluye talleFila por variante
+  prop?: PropuestaNueva;
+  titulo: string;
+  descripcion: string;
+  categoriaId: string;
+  precio: string;
+  stock: string;
+  attrs: Record<string, string>;
+  varAttrId: string;
+  guiaId: string; // guía de talles elegida
+  talleUnico: string; // fila de la guía para el caso sin variantes
+}
+
+const horaAR = (iso?: string) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("es-AR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/Argentina/Buenos_Aires",
+  });
+};
+
+const numCm = (s: string) => Number(s.trim().replace(",", "."));
+
+const inputChico =
+  "rounded-md border border-ink/12 px-2 py-1 text-[13px] outline-none focus:border-accent";
+
+// Sección "Guía de talles": ML la pide para ropa. Elegir una existente o crear
+// una nueva, y asignar el talle de cada variante (o uno solo si no hay variantes).
+function GuiaTallesSeccion({
+  categoria,
+  genero,
+  marca,
+  info,
+  cargando,
+  guiaId,
+  onElegir,
+  onCreada,
+  variantes,
+  talleUnico,
+  onTalleUnico,
+  onTalleVariante,
+}: {
+  categoria: string;
+  genero: string;
+  marca: string;
+  info: GuiasResp;
+  cargando: boolean;
+  guiaId: string;
+  onElegir: (id: string) => void;
+  onCreada: (g: GuiaTalles) => void;
+  variantes: Array<{ idx: number; nombre: string; talleFila?: string }> | null;
+  talleUnico: string;
+  onTalleUnico: (id: string) => void;
+  onTalleVariante: (idx: number, id: string) => void;
+}) {
+  const sel = info.guias.find((g) => g.id === guiaId);
+  const [creando, setCreando] = useState(false);
+  const [nombre, setNombre] = useState("Guía de talles");
+  const filaVacia = (): FilaGuiaForm => ({
+    talle: "",
+    equivalencia: "",
+    pecho: "",
+    ancho: "",
+    largo: "",
+  });
+  const [filas, setFilas] = useState<FilaGuiaForm[]>([filaVacia()]);
+  const [guardando, setGuardando] = useState(false);
+  const [err, setErr] = useState<string>();
+
+  const cambiarFila = (i: number, cambio: Partial<FilaGuiaForm>) =>
+    setFilas((s) => s.map((f, j) => (j === i ? { ...f, ...cambio } : f)));
+
+  async function crear() {
+    setErr(undefined);
+    const nombreLimpio = nombre.trim();
+    if (!nombreLimpio) return setErr("Ponele un nombre a la guía.");
+    for (const [i, f] of filas.entries()) {
+      if (!f.talle.trim()) return setErr(`Falta el talle de la fila ${i + 1}.`);
+      if (!f.equivalencia) return setErr(`Elegí la equivalencia del talle ${f.talle.trim()}.`);
+      if (!(numCm(f.pecho) > 0))
+        return setErr(`Cargá el contorno de pecho (cm) del talle ${f.talle.trim()}.`);
+      if (!(numCm(f.ancho) > 0))
+        return setErr(`Cargá el ancho de pecho de la prenda (cm) del talle ${f.talle.trim()}.`);
+      if (f.largo.trim() && !(numCm(f.largo) > 0))
+        return setErr(`El largo del talle ${f.talle.trim()} tiene que ser mayor a cero.`);
+    }
+    if (
+      !window.confirm(
+        `Se va a crear la guía "${nombreLimpio}" con ${filas.length} talle${filas.length === 1 ? "" : "s"} en tu cuenta de Mercado Libre. ¿Confirmás?`,
+      )
+    )
+      return;
+    setGuardando(true);
+    try {
+      const g = await api<GuiaTalles>("/ia/guias-talles", {
+        method: "POST",
+        body: JSON.stringify({
+          categoria,
+          genero,
+          marca,
+          nombre: nombreLimpio,
+          filas: filas.map((f) => ({
+            talle: f.talle.trim(),
+            equivalencia_id: f.equivalencia,
+            pecho_persona_cm: numCm(f.pecho),
+            ancho_prenda_cm: numCm(f.ancho),
+            largo_prenda_cm: f.largo.trim() ? numCm(f.largo) : undefined,
+          })),
+        }),
+      });
+      onCreada(g);
+      setCreando(false);
+      setFilas([filaVacia()]);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setGuardando(false);
+    }
+  }
+
+  const selectTalle = (valor: string | undefined, onChange: (id: string) => void) => (
+    <select
+      value={sel?.filas.some((f) => f.id === valor) ? valor : ""}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={!sel}
+      className={inputChico}
+    >
+      <option value="">Elegí el talle…</option>
+      {sel?.filas.map((f) => (
+        <option key={f.id} value={f.id}>
+          {f.talle}
+        </option>
+      ))}
+    </select>
+  );
+
+  return (
+    <div className="rounded-lg border border-ink/10 p-3">
+      <div className="mb-2 text-[12.5px] font-semibold text-ink/70">
+        Guía de talles (la pide Mercado Libre para ropa)
+      </div>
+      {info.aviso && <div className="mb-2 text-[11.5px] text-ink/50">{info.aviso}</div>}
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={creando ? "__nueva" : guiaId}
+          onChange={(e) => {
+            if (e.target.value === "__nueva") setCreando(true);
+            else {
+              setCreando(false);
+              onElegir(e.target.value);
+            }
+          }}
+          className={`${inputChico} min-w-0 flex-1`}
+        >
+          <option value="">{cargando ? "Buscando guías…" : "Elegí una guía…"}</option>
+          {info.guias.map((g) => (
+            <option key={g.id} value={g.id}>
+              {g.nombre} ({g.filas.map((f) => f.talle).join(", ")})
+            </option>
+          ))}
+          <option value="__nueva">+ Crear guía nueva</option>
+        </select>
+      </div>
+
+      {creando && (
+        <div className="mt-3 flex flex-col gap-2 rounded-lg bg-ink/[0.03] p-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[12px] text-ink/50">Nombre de la guía</span>
+            <input
+              value={nombre}
+              maxLength={60}
+              onChange={(e) => setNombre(e.target.value)}
+              className={inputChico}
+            />
+          </label>
+          <div className="text-[11.5px] text-ink/45">
+            Medidas en cm. Tienen que crecer de un talle al siguiente.
+          </div>
+          {filas.map((f, i) => (
+            <div key={i} className="grid grid-cols-2 gap-2 border-t hairline pt-2 sm:grid-cols-6">
+              <input
+                value={f.talle}
+                onChange={(e) => cambiarFila(i, { talle: e.target.value })}
+                placeholder="Talle (ej: M)"
+                className={inputChico}
+              />
+              <select
+                value={f.equivalencia}
+                onChange={(e) => cambiarFila(i, { equivalencia: e.target.value })}
+                className={inputChico}
+                title="Equivalencia"
+              >
+                <option value="">Equivale a…</option>
+                {info.equivalencias.map((q) => (
+                  <option key={q.id} value={q.id}>
+                    {q.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={f.pecho}
+                onChange={(e) => cambiarFila(i, { pecho: e.target.value })}
+                inputMode="decimal"
+                placeholder="Pecho persona"
+                title="Contorno de pecho de la persona (cm)"
+                className={inputChico}
+              />
+              <input
+                value={f.ancho}
+                onChange={(e) => cambiarFila(i, { ancho: e.target.value })}
+                inputMode="decimal"
+                placeholder="Ancho prenda"
+                title="Ancho de pecho de la prenda (cm)"
+                className={inputChico}
+              />
+              <input
+                value={f.largo}
+                onChange={(e) => cambiarFila(i, { largo: e.target.value })}
+                inputMode="decimal"
+                placeholder="Largo (opcional)"
+                title="Largo de la prenda (cm), opcional"
+                className={inputChico}
+              />
+              {filas.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setFilas((s) => s.filter((_, j) => j !== i))}
+                  className="self-center text-[16px] font-bold text-ink/35 hover:text-danger"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => setFilas((s) => [...s, filaVacia()])}
+            className="self-start text-[12.5px] font-semibold text-accent hover:text-accent-hover"
+          >
+            + agregar talle
+          </button>
+          {err && <div className="text-[12px] text-danger">{err}</div>}
+          <div className="flex flex-wrap items-center gap-2">
+            <PrimaryButton onClick={() => void crear()} disabled={guardando}>
+              {guardando ? "Creando…" : "Crear guía en Mercado Libre"}
+            </PrimaryButton>
+            <GhostButton onClick={() => setCreando(false)} disabled={guardando}>
+              Cancelar
+            </GhostButton>
+          </div>
+        </div>
+      )}
+
+      {sel && (
+        <div className="mt-3 flex flex-col gap-2 text-[13px]">
+          {variantes ? (
+            variantes.map((v) => (
+              <div key={v.idx} className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate">{v.nombre}</span>
+                {selectTalle(v.talleFila, (id) => onTalleVariante(v.idx, id))}
+              </div>
+            ))
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="flex-1">Talle</span>
+              {selectTalle(talleUnico, onTalleUnico)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const normNombre = (s: string) =>
@@ -1306,9 +1618,7 @@ function NuevaPublicacionModal({
   const [fotos, setFotos] = useState<string[]>([]);
   const [tieneVar, setTieneVar] = useState(false);
   const [eje, setEje] = useState("");
-  const [vars, setVars] = useState<VarianteRow[]>([
-    { nombre: "", fotos: [], stock: "1" },
-  ]);
+  const [vars, setVars] = useState<VarianteRow[]>(VARS_INICIAL());
 
   const [cargando, setCargando] = useState(false);
   const [err, setErr] = useState<string>();
@@ -1324,6 +1634,25 @@ function NuevaPublicacionModal({
   const [varAttrId, setVarAttrId] = useState("");
   const [publicando, setPublicando] = useState(false);
   const [resultado, setResultado] = useState<ResultadoPublicar>();
+
+  // guía de talles (moda): la elegida y el talle del caso sin variantes
+  // (el de cada variante viaja dentro de su VarianteRow.talleFila)
+  const [guiaId, setGuiaId] = useState("");
+  const [talleUnico, setTalleUnico] = useState("");
+  const [guiasInfo, setGuiasInfo] = useState<GuiasResp>();
+  const [guiasCargando, setGuiasCargando] = useState(false);
+  const [guiasErr, setGuiasErr] = useState<string>();
+  // guías creadas en esta sesión: ML puede tardar en listarlas, se mezclan al refrescar
+  const guiasCreadas = useRef<GuiaTalles[]>([]);
+
+  // borrador en el servidor
+  const [borradorListo, setBorradorListo] = useState(false);
+  const [recuperado, setRecuperado] = useState<string>();
+  const [borradorErr, setBorradorErr] = useState(false);
+  // serializa PUT/DELETE del borrador para que un guardado tardío no pise un borrado
+  const colaBorrador = useRef<Promise<unknown>>(Promise.resolve());
+  // se incrementa al "Empezar de cero": frena las fotos con IA que siguen en curso
+  const epoca = useRef(0);
 
   // fotos profesionales con IA: progreso/error por variante ("general" si no hay)
   const [gen, setGen] = useState<
@@ -1343,17 +1672,206 @@ function NuevaPublicacionModal({
 
   const varsListas = vars.filter((v) => v.nombre.trim());
 
+  // ---- borrador: recuperar al abrir, guardar al cambiar ----
+  const encolarBorrador = (fn: () => Promise<unknown>) => {
+    const p = colaBorrador.current.then(fn);
+    colaBorrador.current = p.catch(() => undefined);
+    return p;
+  };
+
+  useEffect(() => {
+    let cancelado = false;
+    (async () => {
+      try {
+        const r = await api<{ borrador: Partial<BorradorNueva> | null; guardado_at?: string }>(
+          "/ia/borrador",
+        );
+        const b = r.borrador;
+        if (cancelado || !b || b.v !== 1) return;
+        setDesc(typeof b.desc === "string" ? b.desc : "");
+        setPrecioObj(typeof b.precioObj === "string" ? b.precioObj : "");
+        setFotos(Array.isArray(b.fotos) ? b.fotos : []);
+        setTieneVar(!!b.tieneVar);
+        setEje(typeof b.eje === "string" ? b.eje : "");
+        setVars(Array.isArray(b.vars) && b.vars.length ? b.vars : VARS_INICIAL());
+        setProp(b.prop ?? undefined);
+        setTitulo(typeof b.titulo === "string" ? b.titulo : "");
+        setDescripcion(typeof b.descripcion === "string" ? b.descripcion : "");
+        setCategoriaId(typeof b.categoriaId === "string" ? b.categoriaId : "");
+        setPrecio(typeof b.precio === "string" ? b.precio : "");
+        setStock(typeof b.stock === "string" ? b.stock : "1");
+        setAttrs(b.attrs && typeof b.attrs === "object" ? b.attrs : {});
+        setVarAttrId(typeof b.varAttrId === "string" ? b.varAttrId : "");
+        setGuiaId(typeof b.guiaId === "string" ? b.guiaId : "");
+        setTalleUnico(typeof b.talleUnico === "string" ? b.talleUnico : "");
+        setRecuperado(horaAR(r.guardado_at) || "antes");
+      } catch {
+        /* sin borrador o sin red: se arranca de cero */
+      } finally {
+        if (!cancelado) setBorradorListo(true);
+      }
+    })();
+    return () => {
+      cancelado = true;
+    };
+  }, []);
+
+  // Autosave con debounce. No guarda antes de terminar de cargar (pisaría el
+  // borrador con el estado vacío) ni si no hay nada que valga la pena.
+  useEffect(() => {
+    if (!borradorListo || resultado) return;
+    const hayAlgo =
+      desc.trim() !== "" || fotos.length > 0 || vars.some((v) => v.fotos.length > 0) || !!prop;
+    if (!hayAlgo) return;
+    const t = setTimeout(() => {
+      const borrador: BorradorNueva = {
+        v: 1,
+        desc,
+        precioObj,
+        fotos,
+        tieneVar,
+        eje,
+        vars,
+        prop,
+        titulo,
+        descripcion,
+        categoriaId,
+        precio,
+        stock,
+        attrs,
+        varAttrId,
+        guiaId,
+        talleUnico,
+      };
+      encolarBorrador(() =>
+        api("/ia/borrador", { method: "PUT", body: JSON.stringify(borrador) }),
+      )
+        .then(() => vivo.current && setBorradorErr(false))
+        .catch(() => vivo.current && setBorradorErr(true));
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [
+    borradorListo,
+    resultado,
+    desc,
+    precioObj,
+    fotos,
+    tieneVar,
+    eje,
+    vars,
+    prop,
+    titulo,
+    descripcion,
+    categoriaId,
+    precio,
+    stock,
+    attrs,
+    varAttrId,
+    guiaId,
+    talleUnico,
+  ]);
+
+  function empezarDeCero() {
+    epoca.current++;
+    setDesc("");
+    setPrecioObj("");
+    setFotos([]);
+    setTieneVar(false);
+    setEje("");
+    setVars(VARS_INICIAL());
+    setProp(undefined);
+    setTitulo("");
+    setDescripcion("");
+    setCategoriaId("");
+    setPrecio("");
+    setStock("1");
+    setAttrs({});
+    setVarAttrId("");
+    setGuiaId("");
+    setTalleUnico("");
+    setGuiasInfo(undefined);
+    guiasCreadas.current = [];
+    setGen({});
+    setErr(undefined);
+    setRecuperado(undefined);
+    setBorradorErr(false);
+    encolarBorrador(() => api("/ia/borrador", { method: "DELETE" })).catch(() => undefined);
+  }
+
+  // ---- guía de talles: consulta cuando se conoce la categoría ----
+  const generoSel = attrs["GENDER"]?.trim() || GENERO_DEFECTO;
+  const marcaSel = attrs["BRAND"]?.trim() || MARCA_DEFECTO;
+  const hayProp = !!prop;
+  useEffect(() => {
+    const cat = categoriaId.trim();
+    if (!hayProp || !cat) {
+      setGuiasInfo(undefined);
+      return;
+    }
+    let cancelado = false;
+    const t = setTimeout(async () => {
+      setGuiasCargando(true);
+      setGuiasErr(undefined);
+      try {
+        const r = await api<GuiasResp>(
+          `/ia/guias-talles?categoria=${encodeURIComponent(cat)}&genero=${encodeURIComponent(generoSel)}&marca=${encodeURIComponent(marcaSel)}`,
+        );
+        if (cancelado) return;
+        const extra = guiasCreadas.current.filter((g) => !r.guias.some((x) => x.id === g.id));
+        setGuiasInfo({ ...r, guias: [...r.guias, ...extra] });
+      } catch (e) {
+        if (!cancelado) {
+          setGuiasInfo(undefined);
+          setGuiasErr((e as Error).message);
+        }
+      } finally {
+        if (!cancelado) setGuiasCargando(false);
+      }
+    }, 600);
+    return () => {
+      cancelado = true;
+      clearTimeout(t);
+    };
+  }, [hayProp, categoriaId, generoSel, marcaSel]);
+
+  const guiaSel = guiasInfo?.guias.find((g) => g.id === guiaId);
+  // Con una guía de una sola fila, todos los talles vacíos o inválidos van a esa.
+  useEffect(() => {
+    if (!guiaSel || guiaSel.filas.length !== 1) return;
+    const f = guiaSel.filas[0].id;
+    setTalleUnico((t) => (guiaSel.filas.some((x) => x.id === t) ? t : f));
+    setVars((s) =>
+      s.some((v) => !guiaSel.filas.some((x) => x.id === v.talleFila))
+        ? s.map((v) =>
+            guiaSel.filas.some((x) => x.id === v.talleFila) ? v : { ...v, talleFila: f },
+          )
+        : s,
+    );
+  }, [guiaSel]);
+
+  const conVarPub = tieneVar && varsListas.length > 0;
+  const guiaIncompleta =
+    !!guiasInfo?.requiere &&
+    (!guiaSel ||
+      (conVarPub
+        ? varsListas.some((v) => !guiaSel.filas.some((x) => x.id === v.talleFila))
+        : !guiaSel.filas.some((x) => x.id === talleUnico)));
+  const talleDe = (filaId: string | undefined) =>
+    guiaSel?.filas.find((x) => x.id === filaId);
+
   // Encarga 3 fotos profesionales (portada, detalle, ambiente) y las va
   // consultando cada 5 s. Las listas se ponen AL FRENTE de las fotos de esa
   // variante (o de las generales si no hay variantes).
   async function generarFotosPro(clave: number | "general") {
     const k = String(clave);
+    const ep = epoca.current;
+    const activo = () => vivo.current && ep === epoca.current;
     const { vars: vs, fotos: fg, titulo: t, desc: d } = ult.current;
     const v = clave === "general" ? undefined : vs[clave];
     const imagenes = [...new Set([...(v?.fotos ?? []), ...fg])].slice(0, 8);
     if (!imagenes.length) return;
     const marca = (x: { activo: boolean; texto?: string; err?: string }) => {
-      if (vivo.current) setGen((g) => ({ ...g, [k]: x }));
+      if (activo()) setGen((g) => ({ ...g, [k]: x }));
     };
     marca({ activo: true, texto: "Encargando fotos…" });
     try {
@@ -1373,13 +1891,13 @@ function NuevaPublicacionModal({
       const pendientes = new Set(enc.tareas.map((_, i) => i));
       const limite = Date.now() + 6 * 60_000;
       let vencio = false;
-      while (pendientes.size && vivo.current) {
+      while (pendientes.size && activo()) {
         if (Date.now() > limite) {
           vencio = true;
           break;
         }
         await new Promise((r) => setTimeout(r, 5000));
-        if (!vivo.current) return;
+        if (!activo()) return;
         await Promise.all(
           [...pendientes].map(async (i) => {
             try {
@@ -1404,7 +1922,7 @@ function NuevaPublicacionModal({
           texto: `Generando fotos… ${hechas}/${enc.tareas.length} listas`,
         });
       }
-      if (!vivo.current) return;
+      if (!activo()) return;
       const nuevas = listas.filter((u): u is string => !!u);
       if (nuevas.length) {
         const alFrente = (act: string[]) => [
@@ -1501,6 +2019,7 @@ function NuevaPublicacionModal({
   }
 
   async function publicar() {
+    if (guiaIncompleta) return;
     const hayVar = tieneVar && varsListas.length > 0;
     if (
       !window.confirm(
@@ -1529,6 +2048,11 @@ function NuevaPublicacionModal({
             precio: Number(precio),
             stock: Number(stock) || 1,
             imagenes: fotos,
+            guia_talles: guiasInfo?.requiere && guiaSel ? { id: guiaSel.id } : undefined,
+            talle_fila:
+              guiasInfo?.requiere && !conVar && talleDe(talleUnico)
+                ? talleDe(talleUnico)
+                : undefined,
             atributos: Object.entries(attrs)
               .filter(([, v]) => v.trim())
               .map(([id, value_name]) => ({ id, value_name: value_name.trim() })),
@@ -1540,6 +2064,10 @@ function NuevaPublicacionModal({
                     value_name: v.nombre.trim(),
                     imagenes: v.fotos,
                     stock: Number(v.stock) || 1,
+                    talle_fila:
+                      guiasInfo?.requiere && talleDe(v.talleFila)
+                        ? talleDe(v.talleFila)
+                        : undefined,
                   })),
                 }
               : undefined,
@@ -1547,6 +2075,8 @@ function NuevaPublicacionModal({
         },
       );
       setResultado(r);
+      // publicada: el borrador ya no hace falta (cerrar con × NO lo borra)
+      encolarBorrador(() => api("/ia/borrador", { method: "DELETE" })).catch(() => undefined);
       onCreada();
     } catch (e) {
       setErr((e as Error).message);
@@ -1568,7 +2098,25 @@ function NuevaPublicacionModal({
           </button>
         </div>
 
-        {resultado ? (
+        {!resultado && recuperado && (
+          <div className="mb-3 flex flex-wrap items-center gap-x-2 text-[12px] text-ink/55">
+            <span>Recuperé el borrador guardado ({recuperado}).</span>
+            <button
+              type="button"
+              onClick={empezarDeCero}
+              className="font-semibold text-accent hover:text-accent-hover"
+            >
+              Empezar de cero
+            </button>
+          </div>
+        )}
+        {borradorErr && !resultado && (
+          <div className="mb-2 text-[11px] text-ink/40">No se pudo guardar el borrador</div>
+        )}
+
+        {!borradorListo ? (
+          <div className="py-6 text-center text-[12.5px] text-ink/45">Buscando borrador…</div>
+        ) : resultado ? (
           <div className="flex flex-col gap-3 text-[13.5px]">
             <div className="rounded-lg bg-ok-bg px-3 py-2 text-ok">
               Publicación creada. <b>{resultado.pausada ? "En pausa." : "Revisá su estado en Mercado Libre."}</b>
@@ -1891,6 +2439,42 @@ function NuevaPublicacionModal({
               </div>
             )}
 
+            {guiasErr && (
+              <div className="text-[12px] text-ink/50">
+                No pude consultar las guías de talles: {guiasErr}
+              </div>
+            )}
+            {guiasInfo?.requiere && (
+              <GuiaTallesSeccion
+                categoria={categoriaId.trim()}
+                genero={generoSel}
+                marca={marcaSel}
+                info={guiasInfo}
+                cargando={guiasCargando}
+                guiaId={guiaId}
+                onElegir={setGuiaId}
+                onCreada={(g) => {
+                  guiasCreadas.current = [...guiasCreadas.current, g];
+                  setGuiasInfo((i) => (i ? { ...i, guias: [...i.guias, g] } : i));
+                  setGuiaId(g.id);
+                }}
+                variantes={
+                  conVarPub
+                    ? varsListas.map((v) => ({
+                        idx: vars.indexOf(v),
+                        nombre: v.nombre,
+                        talleFila: v.talleFila,
+                      }))
+                    : null
+                }
+                talleUnico={talleUnico}
+                onTalleUnico={setTalleUnico}
+                onTalleVariante={(idx, id) =>
+                  setVars((s) => s.map((x, j) => (j === idx ? { ...x, talleFila: id } : x)))
+                }
+              />
+            )}
+
             {prop.atributos_requeridos.length > 0 && (
               <div>
                 <div className="mb-1.5 text-[12.5px] text-ink/50">
@@ -1920,10 +2504,16 @@ function NuevaPublicacionModal({
               </div>
             )}
             {err && <div className="text-[12.5px] text-danger">{err}</div>}
+            {guiaIncompleta && (
+              <div className="text-[12.5px] text-warn">
+                Esta categoría (moda) pide una guía de talles: elegí o creá una y asigná el talle
+                de cada variante.
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-3 border-t hairline pt-4">
               <button
                 onClick={publicar}
-                disabled={publicando}
+                disabled={publicando || guiaIncompleta}
                 className="rounded-[9px] bg-accent px-4 py-2.5 text-[13.5px] font-bold text-white hover:bg-accent-hover disabled:opacity-50"
               >
                 {publicando ? "Creando…" : "Crear en Mercado Libre (en pausa)"}

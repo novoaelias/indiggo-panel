@@ -133,8 +133,9 @@ ia.post("/imagen", async (c) => {
 interface MlCatAttr {
   id: string;
   name: string;
+  value_type?: string;
   tags?: Record<string, boolean>;
-  values?: Array<{ name: string }>;
+  values?: Array<{ id?: string; name: string }>;
 }
 
 async function categoriaAttrs(
@@ -310,6 +311,465 @@ En "atributos_sugeridos" poné sólo lo que puedas deducir con seguridad de las 
   });
 });
 
+// ---------------------------------------------------------------------------
+// Borrador de la publicación nueva: un solo JSON en un bucket privado, para que
+// el trabajo del modal sobreviva a una recarga (fotos subidas, fotos con IA que
+// tardan minutos, atributos editados).
+// ---------------------------------------------------------------------------
+
+const BUCKET_BORRADORES = "borradores";
+const RUTA_BORRADOR = "publicacion-nueva.json";
+const MAX_BORRADOR_BYTES = 500_000;
+let bucketBorradoresListo = false;
+
+// Crea el bucket privado la primera vez; si ya existe, no pasa nada.
+async function asegurarBucketBorradores(db: ReturnType<typeof supa>): Promise<void> {
+  if (bucketBorradoresListo) return;
+  const { error } = await db.storage.createBucket(BUCKET_BORRADORES, { public: false });
+  if (error && !/already exists|duplicate/i.test(error.message))
+    throw new Error(error.message);
+  bucketBorradoresListo = true;
+}
+
+ia.get("/borrador", async (c) => {
+  const db = supa(c.env);
+  const { data, error } = await db.storage.from(BUCKET_BORRADORES).download(RUTA_BORRADOR);
+  if (error || !data) return c.json({ borrador: null });
+  try {
+    const borrador = JSON.parse(await data.text()) as Record<string, unknown>;
+    const guardado = typeof borrador.guardado_at === "string" ? borrador.guardado_at : undefined;
+    return c.json({ borrador, guardado_at: guardado });
+  } catch {
+    return c.json({ borrador: null });
+  }
+});
+
+ia.put("/borrador", async (c) => {
+  const texto = await c.req.text();
+  if (texto.length > MAX_BORRADOR_BYTES)
+    return c.json({ error: "El borrador es demasiado grande para guardarse." }, 413);
+  let cuerpo: unknown;
+  try {
+    cuerpo = JSON.parse(texto);
+  } catch {
+    return c.json({ error: "El borrador no es un JSON válido." }, 400);
+  }
+  if (!cuerpo || typeof cuerpo !== "object" || Array.isArray(cuerpo))
+    return c.json({ error: "El borrador tiene que ser un objeto." }, 400);
+
+  const db = supa(c.env);
+  try {
+    await asegurarBucketBorradores(db);
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 502);
+  }
+  const guardado_at = new Date().toISOString();
+  const up = await db.storage.from(BUCKET_BORRADORES).upload(
+    RUTA_BORRADOR,
+    new Blob([JSON.stringify({ ...(cuerpo as object), guardado_at })], {
+      type: "application/json",
+    }),
+    { contentType: "application/json", upsert: true },
+  );
+  if (up.error) return c.json({ error: up.error.message }, 502);
+  return c.json({ ok: true, guardado_at });
+});
+
+ia.delete("/borrador", async (c) => {
+  const db = supa(c.env);
+  const { error } = await db.storage.from(BUCKET_BORRADORES).remove([RUTA_BORRADOR]);
+  if (error) return c.json({ error: error.message }, 502);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Guías de talles (ropa). Mercado Libre las exige en categorías de moda: el
+// ítem lleva SIZE_GRID_ID, SIZE_GRID_ROW_ID y SIZE, y la guía se crea aparte
+// en /catalog/charts.
+// ---------------------------------------------------------------------------
+
+type DB = ReturnType<typeof supa>;
+
+interface FilaGuia {
+  id: string;
+  talle: string;
+}
+interface GuiaTalles {
+  id: string;
+  nombre: string;
+  filas: FilaGuia[];
+}
+interface Equivalencia {
+  id: string;
+  name: string;
+}
+
+// Equivalencias (FILTRABLE_SIZE) conocidas de T_SHIRTS: sólo de respaldo si
+// technical_specs falla.
+const EQUIVALENCIAS_RESPALDO: Equivalencia[] = [
+  { id: "12917835", name: "3XS" },
+  { id: "12917836", name: "2XS" },
+  { id: "12917776", name: "XS" },
+  { id: "12917796", name: "S" },
+  { id: "12917795", name: "M" },
+  { id: "12917802", name: "L" },
+  { id: "12917787", name: "XL" },
+  { id: "12917846", name: "2XL" },
+  { id: "12917837", name: "3XL" },
+  { id: "12917843", name: "4XL" },
+  { id: "12917842", name: "5XL" },
+  { id: "12917838", name: "6XL" },
+  { id: "12917841", name: "7XL" },
+  { id: "12917845", name: "8XL" },
+];
+
+const GENERO_POR_DEFECTO = "Sin género";
+const MARCA_POR_DEFECTO = "Indiggo Store";
+const AGE_GROUP_ADULTOS = { id: "AGE_GROUP", value_id: "6725189", value_name: "Adultos" };
+const MSJ_FALTA_GUIA =
+  "Esta categoría (moda) pide una guía de talles: elegí o creá una y asigná el talle de cada variante.";
+
+const requiereGuia = (attrs: MlCatAttr[]) => attrs.some((a) => a.value_type === "grid_id");
+
+// Dominio de la categoría ("MLA-T_SHIRTS"). Primero el dato de la categoría;
+// si no viene, domain_discovery buscando por el nombre de la categoría.
+async function dominioDeCategoria(
+  env: Env,
+  db: DB,
+  categoriaId: string,
+): Promise<string | null> {
+  let nombre = "";
+  try {
+    const r = await mlFetch(env, db, `/categories/${categoriaId}`);
+    if (r.ok) {
+      const j = (await r.json()) as {
+        name?: string;
+        domain_id?: string;
+        settings?: { domain_id?: string };
+      };
+      const directo = j.domain_id ?? j.settings?.domain_id;
+      if (directo) return directo;
+      nombre = j.name ?? "";
+    }
+  } catch {
+    /* se prueba con domain_discovery */
+  }
+  if (!nombre) return null;
+  try {
+    const r = await mlFetch(
+      env,
+      db,
+      `/sites/MLA/domain_discovery/search?limit=8&q=${encodeURIComponent(nombre)}`,
+    );
+    if (r.ok) {
+      const arr = (await r.json()) as Array<{ category_id?: string; domain_id?: string }>;
+      return arr.find((x) => x.category_id === categoriaId)?.domain_id ?? null;
+    }
+  } catch {
+    /* sin dominio */
+  }
+  return null;
+}
+
+// Los endpoints de guías usan el dominio sin el prefijo del sitio ("T_SHIRTS").
+const dominioSinSitio = (d: string) => d.replace(/^MLA-/, "");
+
+async function vendedorId(env: Env, db: DB): Promise<string | null> {
+  try {
+    const r = await mlFetch(env, db, "/users/me");
+    if (r.ok) {
+      const j = (await r.json()) as { id?: number | string };
+      if (j.id) return String(j.id);
+    }
+  } catch {
+    /* se usa la variable de entorno */
+  }
+  const deEnv = (env as unknown as { ML_SELLER_ID?: string }).ML_SELLER_ID;
+  return deEnv ? String(deEnv) : null;
+}
+
+// Busca recursivamente el atributo `id` dentro de la respuesta de technical_specs
+// (la estructura de grupos/componentes cambia según el dominio).
+function buscarAtributo(nodo: unknown, id: string): { values?: unknown } | null {
+  if (!nodo || typeof nodo !== "object") return null;
+  if (Array.isArray(nodo)) {
+    for (const x of nodo) {
+      const r = buscarAtributo(x, id);
+      if (r) return r;
+    }
+    return null;
+  }
+  const o = nodo as Record<string, unknown>;
+  if (o.id === id && Array.isArray(o.values)) return o as { values?: unknown };
+  for (const v of Object.values(o)) {
+    const r = buscarAtributo(v, id);
+    if (r) return r;
+  }
+  return null;
+}
+
+async function equivalenciasDeTalle(
+  env: Env,
+  db: DB,
+  dominio: string,
+  genero: string,
+  generoId: string | undefined,
+  marca: string,
+): Promise<Equivalencia[]> {
+  try {
+    const r = await mlFetch(env, db, `/domains/${dominio}/technical_specs?section=grids`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        attributes: [
+          { id: "BRAND", value_name: marca, values: [{ name: marca }] },
+          {
+            id: "GENDER",
+            ...(generoId ? { value_id: generoId } : {}),
+            value_name: genero,
+            values: [generoId ? { id: generoId, name: genero } : { name: genero }],
+          },
+        ],
+      }),
+    });
+    if (r.ok) {
+      const attr = buscarAtributo(await r.json(), "FILTRABLE_SIZE");
+      const vals = ((attr?.values as Array<{ id?: string; name?: string }>) ?? [])
+        .filter((v) => v.id && v.name)
+        .map((v) => ({ id: String(v.id), name: String(v.name) }));
+      if (vals.length) return vals;
+    }
+  } catch {
+    /* respaldo */
+  }
+  return EQUIVALENCIAS_RESPALDO;
+}
+
+interface ChartMl {
+  id: string | number;
+  names?: Record<string, string>;
+  rows?: Array<{
+    id: string;
+    attributes?: Array<{ id: string; values?: Array<{ name?: string }> }>;
+  }>;
+}
+
+function guiaDeChart(ch: ChartMl): GuiaTalles {
+  return {
+    id: String(ch.id),
+    nombre: ch.names?.MLA ?? `Guía ${ch.id}`,
+    filas: (ch.rows ?? []).map((f) => ({
+      id: f.id,
+      talle:
+        f.attributes?.find((a) => a.id === "SIZE")?.values?.[0]?.name ??
+        String(f.id).split(":").pop() ??
+        f.id,
+    })),
+  };
+}
+
+// Id del valor de GENDER en la categoría, buscado por nombre.
+function generoIdDe(attrs: MlCatAttr[], genero: string): string | undefined {
+  const g = attrs.find((a) => a.id === "GENDER");
+  const n = genero.trim().toLowerCase();
+  return g?.values?.find((v) => v.name.trim().toLowerCase() === n)?.id;
+}
+
+ia.get("/guias-talles", async (c) => {
+  const categoria = c.req.query("categoria")?.trim();
+  if (!categoria) return c.json({ error: "falta la categoría" }, 400);
+  const genero = c.req.query("genero")?.trim() || GENERO_POR_DEFECTO;
+  const marca = c.req.query("marca")?.trim() || MARCA_POR_DEFECTO;
+  const db = supa(c.env);
+
+  const attrs = await categoriaAttrs(c.env, db, categoria);
+  if (!requiereGuia(attrs)) return c.json({ requiere: false, guias: [], equivalencias: [] });
+
+  const dominioCompleto = await dominioDeCategoria(c.env, db, categoria);
+  if (!dominioCompleto)
+    return c.json({
+      requiere: true,
+      guias: [],
+      equivalencias: EQUIVALENCIAS_RESPALDO,
+      aviso: "No pude averiguar el dominio de la categoría; no se listan guías existentes.",
+    });
+  const dominio = dominioSinSitio(dominioCompleto);
+  const generoId = generoIdDe(attrs, genero);
+
+  let guias: GuiaTalles[] = [];
+  let aviso: string | undefined;
+  const seller = await vendedorId(c.env, db);
+  if (seller) {
+    try {
+      const r = await mlFetch(c.env, db, "/catalog/charts/search", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          domain_id: dominio,
+          site_id: "MLA",
+          seller_id: Number(seller),
+          attributes: [
+            { id: "GENDER", values: [{ name: genero }] },
+            { id: "BRAND", values: [{ name: marca }] },
+          ],
+        }),
+      });
+      if (r.ok) {
+        const j = (await r.json()) as { charts?: ChartMl[] };
+        guias = (j.charts ?? []).map(guiaDeChart);
+      } else {
+        aviso = `Mercado Libre no listó las guías (${r.status}).`;
+      }
+    } catch (e) {
+      aviso = `No pude listar las guías: ${(e as Error).message}`;
+    }
+  }
+
+  const equivalencias = await equivalenciasDeTalle(
+    c.env,
+    db,
+    dominioCompleto,
+    genero,
+    generoId,
+    marca,
+  );
+  return c.json({ requiere: true, dominio: dominioCompleto, guias, equivalencias, aviso });
+});
+
+interface CrearGuiaBody {
+  categoria?: string;
+  genero?: string;
+  marca?: string;
+  nombre?: string;
+  filas?: Array<{
+    talle?: string;
+    equivalencia_id?: string;
+    pecho_persona_cm?: number;
+    ancho_prenda_cm?: number;
+    largo_prenda_cm?: number | null;
+  }>;
+}
+
+// Crea la guía en Mercado Libre (escritura real). Devuelve el error de ML tal cual.
+ia.post("/guias-talles", async (c) => {
+  const body = await c.req.json<CrearGuiaBody>();
+  const categoria = body.categoria?.trim();
+  if (!categoria) return c.json({ error: "Falta la categoría." }, 400);
+  const genero = body.genero?.trim() || GENERO_POR_DEFECTO;
+  const marca = body.marca?.trim() || MARCA_POR_DEFECTO;
+  // ML sólo admite letras, números y espacios (máx. 60), sin paréntesis ni flechas.
+  const nombre = (body.nombre ?? "")
+    .replace(/[^\p{L}\p{N} ]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60)
+    .trim();
+  if (!nombre)
+    return c.json({ error: "Ponele un nombre a la guía (sólo letras, números y espacios)." }, 400);
+  const filasIn = body.filas ?? [];
+  if (filasIn.length === 0) return c.json({ error: "Agregá al menos un talle a la guía." }, 400);
+  const positivo = (n: unknown): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n > 0;
+  for (const [i, f] of filasIn.entries()) {
+    const etiqueta = f.talle?.trim() ? `"${f.talle.trim()}"` : `${i + 1}`;
+    if (!f.talle?.trim()) return c.json({ error: `La fila ${i + 1} no tiene talle.` }, 400);
+    if (!f.equivalencia_id)
+      return c.json({ error: `Elegí la equivalencia del talle ${etiqueta}.` }, 400);
+    if (!positivo(f.pecho_persona_cm))
+      return c.json(
+        { error: `El contorno de pecho del talle ${etiqueta} tiene que ser mayor a cero.` },
+        400,
+      );
+    if (!positivo(f.ancho_prenda_cm))
+      return c.json(
+        { error: `El ancho de pecho de la prenda del talle ${etiqueta} tiene que ser mayor a cero.` },
+        400,
+      );
+    if (f.largo_prenda_cm != null && !positivo(f.largo_prenda_cm))
+      return c.json(
+        { error: `El largo de la prenda del talle ${etiqueta} tiene que ser mayor a cero.` },
+        400,
+      );
+  }
+
+  const db = supa(c.env);
+  const attrs = await categoriaAttrs(c.env, db, categoria);
+  if (!requiereGuia(attrs)) return c.json({ error: "Esta categoría no usa guía de talles." }, 400);
+  const dominioCompleto = await dominioDeCategoria(c.env, db, categoria);
+  if (!dominioCompleto)
+    return c.json({ error: "No pude averiguar el dominio de la categoría en Mercado Libre." }, 502);
+  const dominio = dominioSinSitio(dominioCompleto);
+  const generoId = generoIdDe(attrs, genero);
+  const equivalencias = await equivalenciasDeTalle(
+    c.env,
+    db,
+    dominioCompleto,
+    genero,
+    generoId,
+    marca,
+  );
+
+  const cm = (n: number) => ({ name: `${n} cm`, struct: { number: n, unit: "cm" } });
+  const filas: Array<{ attributes: unknown[] }> = [];
+  for (const f of filasIn) {
+    const talle = (f.talle ?? "").trim();
+    const eq = equivalencias.find((e) => e.id === f.equivalencia_id);
+    if (!eq) return c.json({ error: `La equivalencia del talle "${talle}" no es válida.` }, 400);
+    filas.push({
+      attributes: [
+        { id: "SIZE", values: [{ name: talle }] },
+        { id: "FILTRABLE_SIZE", values: [{ id: eq.id, name: eq.name }] },
+        { id: "CHEST_CIRCUMFERENCE_FROM", values: [cm(f.pecho_persona_cm as number)] },
+        { id: "GARMENT_CHEST_WIDTH_FROM", values: [cm(f.ancho_prenda_cm as number)] },
+        ...(f.largo_prenda_cm
+          ? [{ id: "GARMENT_LENGTH_FROM", values: [cm(f.largo_prenda_cm)] }]
+          : []),
+      ],
+    });
+  }
+
+  const payload = {
+    names: { MLA: nombre },
+    domain_id: dominio,
+    site_id: "MLA",
+    main_attribute: { attributes: [{ site_id: "MLA", id: "SIZE" }] },
+    attributes: [
+      { id: "GENDER", values: [generoId ? { id: generoId, name: genero } : { name: genero }] },
+      { id: "BRAND", values: [{ name: marca }] },
+    ],
+    rows: filas,
+  };
+
+  try {
+    const r = await mlFetch(c.env, db, "/catalog/charts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const texto = await r.text();
+    let j: (ChartMl & { message?: string; errors?: unknown[]; cause?: unknown[] }) | null = null;
+    try {
+      j = texto ? JSON.parse(texto) : null;
+    } catch {
+      /* se devuelve el texto crudo */
+    }
+    if (!r.ok || !j?.id) {
+      const detalle = [j?.message, ...(j?.errors ?? []), ...(j?.cause ?? [])]
+        .filter(Boolean)
+        .map((x) => (typeof x === "string" ? x : JSON.stringify(x)))
+        .join(" · ");
+      return c.json(
+        { error: `Mercado Libre rechazó la guía: ${detalle || texto}`.slice(0, 1500) },
+        502,
+      );
+    }
+    const guia = guiaDeChart(j);
+    return c.json({ ...guia, nombre: guia.nombre || nombre });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 502);
+  }
+});
+
 interface PublicarBody {
   titulo?: string;
   descripcion?: string;
@@ -319,6 +779,8 @@ interface PublicarBody {
   imagenes?: string[];
   atributos?: Array<{ id: string; value_name: string }>;
   family_name?: string;
+  guia_talles?: { id: string };
+  talle_fila?: { id: string; talle: string };
   variantes?: {
     atributo_id?: string;
     atributo_nombre?: string;
@@ -327,6 +789,7 @@ interface PublicarBody {
       imagenes?: string[];
       stock?: number;
       precio?: number;
+      talle_fila?: { id: string; talle: string };
     }>;
   };
 }
@@ -352,6 +815,47 @@ ia.post("/publicar", async (c) => {
     fotosProducto.length > 0 || variantesRaw.some((v) => (v.imagenes ?? []).some(Boolean));
   if (!hayFotos) return c.json({ error: "Cargá al menos una foto antes de publicar." }, 400);
   if (!Number.isFinite(body.precio) || body.precio <= 0) return c.json({ error: "Ingresá un precio mayor a cero." }, 400);
+
+  // Moda: ML pide guía de talles. Se chequea antes de tocar nada en ML.
+  const catAttrs = await categoriaAttrs(c.env, db, body.categoria_id);
+  const exigeGuia = requiereGuia(catAttrs);
+  const guiaId = body.guia_talles?.id?.trim();
+  if (exigeGuia) {
+    const filaOk = (f?: { id: string; talle: string }) =>
+      !!f?.id?.trim() && !!f?.talle?.trim();
+    const completo =
+      !!guiaId &&
+      (conVariantes
+        ? variantesRaw.every((v) => filaOk(v.talle_fila))
+        : filaOk(body.talle_fila));
+    if (!completo) return c.json({ error: MSJ_FALTA_GUIA }, 400);
+  }
+  const tieneAgeGroup = catAttrs.some((a) => a.id === "AGE_GROUP");
+
+  // Atributos finales de un ítem: la fila de la guía pisa a SIZE, y si la
+  // categoría tiene AGE_GROUP y nadie lo mandó, va "Adultos" (salvo género infantil).
+  const conGuiaYEdad = (
+    base: Array<Record<string, unknown>>,
+    fila?: { id: string; talle: string },
+  ): Array<Record<string, unknown>> => {
+    let out = base;
+    if (guiaId && fila?.id) {
+      out = [
+        ...out.filter(
+          (a) => !["SIZE_GRID_ID", "SIZE_GRID_ROW_ID", "SIZE"].includes(String(a.id)),
+        ),
+        { id: "SIZE_GRID_ID", value_name: guiaId },
+        { id: "SIZE_GRID_ROW_ID", value_name: fila.id },
+        { id: "SIZE", value_name: fila.talle.trim() },
+      ];
+    }
+    if (tieneAgeGroup && !out.some((a) => a.id === "AGE_GROUP")) {
+      const genero = String(out.find((a) => a.id === "GENDER")?.value_name ?? "");
+      if (!/ni[ñn][oa]s?|beb[eé]s?|infantil/i.test(genero))
+        out = [...out, { ...AGE_GROUP_ADULTOS }];
+    }
+    return out;
+  };
 
   const avisos: string[] = [];
   const maxFotos = 12;
@@ -494,7 +998,7 @@ ia.post("/publicar", async (c) => {
         price: v.precio ?? body.precio,
         available_quantity: Math.max(v.stock ?? body.stock ?? 1, 1),
         pictures: todas.slice(0, maxFotos).map((source) => ({ source })),
-        attributes: [...attrsComunes, eje],
+        attributes: conGuiaYEdad([...attrsComunes, eje], v.talle_fila),
         shipping: mercadoEnviosSinFlex(false),
       };
       const res = await crearItem(item, valor);
@@ -559,7 +1063,7 @@ ia.post("/publicar", async (c) => {
     condition: "new",
     listing_type_id: "gold_special",
     pictures: poolUnico.slice(0, maxFotos).map((source) => ({ source })),
-    attributes: atributos,
+    attributes: conGuiaYEdad(atributos, body.talle_fila),
     shipping: mercadoEnviosSinFlex(false),
     ...(familyName ? { family_name: familyName } : {}),
     price: body.precio,

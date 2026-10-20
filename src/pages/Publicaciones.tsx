@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { SubirFotos } from "@/components/SubirFotos";
 import {
@@ -1278,6 +1278,20 @@ const normNombre = (s: string) =>
     .normalize("NFD")
     .replace(/[^a-z]/g, "");
 
+interface ResultadoPublicar {
+  permalink: string | null;
+  pausada?: boolean;
+  envio_verificado?: boolean;
+  avisos: string[];
+  items?: Array<{
+    variante: string;
+    ml_item_id: string;
+    permalink: string | null;
+    pausada: boolean;
+    envio_verificado: boolean;
+  }>;
+}
+
 // Sube fotos al bucket "publicaciones" (una por archivo) y devuelve sus URLs.
 function NuevaPublicacionModal({
   onClose,
@@ -1309,15 +1323,140 @@ function NuevaPublicacionModal({
   const [attrs, setAttrs] = useState<Record<string, string>>({});
   const [varAttrId, setVarAttrId] = useState("");
   const [publicando, setPublicando] = useState(false);
-  const [resultado, setResultado] =
-    useState<{
-      permalink: string | null;
-      pausada?: boolean;
-      envio_verificado?: boolean;
-      avisos: string[];
-    }>();
+  const [resultado, setResultado] = useState<ResultadoPublicar>();
+
+  // fotos profesionales con IA: progreso/error por variante ("general" si no hay)
+  const [gen, setGen] = useState<
+    Record<string, { activo: boolean; texto?: string; err?: string }>
+  >({});
+  // Corta el polling al cerrar el modal (sin setState después de desmontar).
+  const vivo = useRef(true);
+  useEffect(() => {
+    vivo.current = true;
+    return () => {
+      vivo.current = false;
+    };
+  }, []);
+  // Última versión del estado, para que el polling no lea valores viejos.
+  const ult = useRef({ vars, fotos, titulo, desc });
+  ult.current = { vars, fotos, titulo, desc };
 
   const varsListas = vars.filter((v) => v.nombre.trim());
+
+  // Encarga 3 fotos profesionales (portada, detalle, ambiente) y las va
+  // consultando cada 5 s. Las listas se ponen AL FRENTE de las fotos de esa
+  // variante (o de las generales si no hay variantes).
+  async function generarFotosPro(clave: number | "general") {
+    const k = String(clave);
+    const { vars: vs, fotos: fg, titulo: t, desc: d } = ult.current;
+    const v = clave === "general" ? undefined : vs[clave];
+    const imagenes = [...new Set([...(v?.fotos ?? []), ...fg])].slice(0, 8);
+    if (!imagenes.length) return;
+    const marca = (x: { activo: boolean; texto?: string; err?: string }) => {
+      if (vivo.current) setGen((g) => ({ ...g, [k]: x }));
+    };
+    marca({ activo: true, texto: "Encargando fotos…" });
+    try {
+      const enc = await api<{
+        tareas: Array<{ tipo: string; taskId: string }>;
+        costo_usd: number;
+      }>("/ia/fotos-pro/encargar", {
+        method: "POST",
+        body: JSON.stringify({
+          imagenes,
+          producto: t.trim() || d.trim(),
+          variante: v?.nombre.trim() || undefined,
+        }),
+      });
+      const listas: Array<string | undefined> = enc.tareas.map(() => undefined);
+      const fallos: string[] = [];
+      const pendientes = new Set(enc.tareas.map((_, i) => i));
+      const limite = Date.now() + 6 * 60_000;
+      let vencio = false;
+      while (pendientes.size && vivo.current) {
+        if (Date.now() > limite) {
+          vencio = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+        if (!vivo.current) return;
+        await Promise.all(
+          [...pendientes].map(async (i) => {
+            try {
+              const r = await api<{ estado: string; url?: string; detalle?: string }>(
+                `/ia/fotos-pro/${encodeURIComponent(enc.tareas[i].taskId)}`,
+              );
+              if (r.estado === "listo" && r.url) {
+                listas[i] = r.url;
+                pendientes.delete(i);
+              } else if (r.estado === "error") {
+                fallos.push(`${enc.tareas[i].tipo}: ${r.detalle ?? "falló"}`);
+                pendientes.delete(i);
+              }
+            } catch {
+              /* error de red puntual: se reintenta en la próxima vuelta */
+            }
+          }),
+        );
+        const hechas = enc.tareas.length - pendientes.size - fallos.length;
+        marca({
+          activo: true,
+          texto: `Generando fotos… ${hechas}/${enc.tareas.length} listas`,
+        });
+      }
+      if (!vivo.current) return;
+      const nuevas = listas.filter((u): u is string => !!u);
+      if (nuevas.length) {
+        const alFrente = (act: string[]) => [
+          ...nuevas,
+          ...act.filter((u) => !nuevas.includes(u)),
+        ];
+        if (clave === "general") setFotos(alFrente);
+        else
+          setVars((s) =>
+            s.map((x, j) => (j === clave ? { ...x, fotos: alFrente(x.fotos) } : x)),
+          );
+      }
+      const problemas = [
+        ...(vencio ? ["se agotó el tiempo de espera (6 min); reintentá en un rato"] : []),
+        ...fallos,
+      ];
+      marca({
+        activo: false,
+        texto: nuevas.length
+          ? `Listo: ${nuevas.length} foto${nuevas.length === 1 ? "" : "s"} nueva${nuevas.length === 1 ? "" : "s"} al principio.`
+          : undefined,
+        err: problemas.length ? problemas.join(" · ") : undefined,
+      });
+    } catch (e) {
+      marca({ activo: false, err: (e as Error).message });
+    }
+  }
+
+  function generarTodas() {
+    ult.current.vars.forEach((v, i) => {
+      if (v.nombre.trim() && v.fotos.length > 0 && !gen[String(i)]?.activo)
+        void generarFotosPro(i);
+    });
+  }
+
+  const botonFotosPro = (clave: number | "general", sinFotos: boolean) => {
+    const g = gen[String(clave)];
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <GhostButton
+            onClick={() => void generarFotosPro(clave)}
+            disabled={!!g?.activo || sinFotos}
+          >
+            {g?.activo ? "Generando…" : "Generar 3 fotos profesionales con IA"}
+          </GhostButton>
+          {g?.texto && <span className="text-[12px] text-ink/60">{g.texto}</span>}
+        </div>
+        {g?.err && <div className="text-[12px] text-danger">{g.err}</div>}
+      </div>
+    );
+  };
 
   async function generar(e: React.FormEvent) {
     e.preventDefault();
@@ -1362,9 +1501,12 @@ function NuevaPublicacionModal({
   }
 
   async function publicar() {
+    const hayVar = tieneVar && varsListas.length > 0;
     if (
       !window.confirm(
-        "Se va a crear la publicación en Mercado Libre EN PAUSA. La revisás y activás desde ML. ¿Confirmás?",
+        hayVar
+          ? `Se van a crear ${varsListas.length} publicaciones en Mercado Libre, una por variante, todas EN PAUSA. ML las agrupa en la misma familia. Las revisás y activás desde ML. ¿Confirmás?`
+          : "Se va a crear la publicación en Mercado Libre EN PAUSA. La revisás y activás desde ML. ¿Confirmás?",
       )
     )
       return;
@@ -1376,12 +1518,7 @@ function NuevaPublicacionModal({
         prop?.variacion?.atributos.find((a) => a.id === varAttrId)?.nombre ||
         eje.trim() ||
         "Variante";
-      const r = await api<{
-        permalink: string | null;
-        pausada?: boolean;
-        envio_verificado?: boolean;
-        avisos: string[];
-      }>(
+      const r = await api<ResultadoPublicar>(
         "/ia/publicar",
         {
           method: "POST",
@@ -1446,15 +1583,37 @@ function NuevaPublicacionModal({
                 ))}
               </ul>
             )}
-            {resultado.permalink && (
-              <a
-                href={resultado.permalink}
-                target="_blank"
-                rel="noreferrer"
-                className="font-semibold text-accent"
-              >
-                Abrir en Mercado Libre →
-              </a>
+            {resultado.items && resultado.items.length > 0 ? (
+              <ul className="flex flex-col gap-1.5">
+                {resultado.items.map((it) => (
+                  <li key={it.ml_item_id} className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate">{it.variante}</span>
+                    {it.permalink ? (
+                      <a
+                        href={it.permalink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-semibold text-accent"
+                      >
+                        Abrir en Mercado Libre →
+                      </a>
+                    ) : (
+                      <span className="text-[12px] text-ink/40">{it.ml_item_id}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              resultado.permalink && (
+                <a
+                  href={resultado.permalink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-semibold text-accent"
+                >
+                  Abrir en Mercado Libre →
+                </a>
+              )
             )}
             <PrimaryButton onClick={onClose}>Cerrar</PrimaryButton>
           </div>
@@ -1634,10 +1793,41 @@ function NuevaPublicacionModal({
               )}
             </div>
 
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[12.5px] text-ink/50">
+                {tieneVar && varsListas.length > 0
+                  ? "Fotos generales (se agregan al final de cada variante)"
+                  : "Fotos del producto"}
+              </span>
+              <SubirFotos fotos={fotos} onChange={setFotos} max={10} />
+              {!(tieneVar && varsListas.length > 0) && (
+                <>
+                  {botonFotosPro("general", fotos.length === 0)}
+                  <span className="text-[11.5px] text-ink/40">
+                    Usa 3 imágenes de IA (≈ US$ 0,27)
+                  </span>
+                </>
+              )}
+            </div>
+
             {tieneVar && varsListas.length > 0 && (
               <div className="rounded-lg border border-ink/10 p-3">
-                <div className="mb-2 text-[12.5px] text-ink/50">
-                  Variantes ({varsListas.length}) · precio y stock por fila
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-ink/50">
+                  <span className="flex-1">
+                    Variantes ({varsListas.length}) · precio y stock por fila
+                  </span>
+                  <GhostButton
+                    onClick={generarTodas}
+                    disabled={
+                      !varsListas.some((v) => v.fotos.length > 0) ||
+                      Object.values(gen).some((g) => g.activo)
+                    }
+                  >
+                    Generar fotos para todas las variantes
+                  </GhostButton>
+                </div>
+                <div className="mb-2 text-[11.5px] text-ink/40">
+                  Cada variante usa 3 imágenes de IA (≈ US$ 0,27)
                 </div>
                 {prop.variacion && prop.variacion.atributos.length > 0 && (
                   <label className="mb-3 flex flex-col gap-1">
@@ -1662,23 +1852,38 @@ function NuevaPublicacionModal({
                   {varsListas.map((v) => {
                     const idx = vars.indexOf(v);
                     return (
-                      <div key={idx} className="flex items-center gap-2 text-[13px]">
-                        <span className="min-w-0 flex-1 truncate">{v.nombre}</span>
-                        <span className="text-[11.5px] text-ink/40">
-                          {v.fotos.length} foto{v.fotos.length === 1 ? "" : "s"}
-                        </span>
-                        <input
-                          value={v.stock}
-                          onChange={(e) =>
+                      <div
+                        key={idx}
+                        className="flex flex-col gap-2 border-t hairline pt-3 text-[13px] first:border-t-0 first:pt-0"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="min-w-0 flex-1 truncate font-semibold">
+                            {v.nombre}
+                          </span>
+                          <input
+                            value={v.stock}
+                            onChange={(e) =>
+                              setVars((s) =>
+                                s.map((x, j) =>
+                                  j === idx ? { ...x, stock: e.target.value } : x,
+                                ),
+                              )
+                            }
+                            inputMode="numeric"
+                            title="Stock"
+                            className="w-16 rounded-md border border-ink/12 px-2 py-1 text-center outline-none focus:border-accent"
+                          />
+                        </div>
+                        <SubirFotos
+                          fotos={v.fotos}
+                          onChange={(f) =>
                             setVars((s) =>
-                              s.map((x, j) =>
-                                j === idx ? { ...x, stock: e.target.value } : x,
-                              ),
+                              s.map((x, j) => (j === idx ? { ...x, fotos: f } : x)),
                             )
                           }
-                          inputMode="numeric"
-                          className="w-16 rounded-md border border-ink/12 px-2 py-1 text-center outline-none focus:border-accent"
+                          max={10}
                         />
+                        {botonFotosPro(idx, v.fotos.length === 0 && fotos.length === 0)}
                       </div>
                     );
                   })}

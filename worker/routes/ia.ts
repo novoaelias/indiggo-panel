@@ -2,7 +2,13 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import { supa } from "../lib/supabase";
 import { claude, mensajeConImagenes, parseJsonLaxo } from "../lib/claude";
-import { costoUsd, generarImagen } from "../lib/kie";
+import {
+  costoUsd,
+  encargarEdicionPro,
+  estadoTarea,
+  generarImagen,
+  MODELO_EDICION,
+} from "../lib/kie";
 import { mlFetch } from "../lib/ml";
 import { syncOneItem } from "../lib/sync";
 import { derivarCatalogo } from "../lib/derivar";
@@ -342,15 +348,207 @@ ia.post("/publicar", async (c) => {
   );
   const conVariantes = variantesRaw.length > 0;
 
-  // pool de fotos del item = fotos del producto + todas las de las variantes
-  const poolFotos = [
-    ...fotosProducto,
-    ...variantesRaw.flatMap((v) => (v.imagenes ?? []).filter(Boolean)),
-  ];
-  const poolUnico = [...new Set(poolFotos)].slice(0, 12);
-  if (!poolUnico.length) return c.json({ error: "Cargá al menos una foto antes de publicar." }, 400);
+  const hayFotos =
+    fotosProducto.length > 0 || variantesRaw.some((v) => (v.imagenes ?? []).some(Boolean));
+  if (!hayFotos) return c.json({ error: "Cargá al menos una foto antes de publicar." }, 400);
   if (!Number.isFinite(body.precio) || body.precio <= 0) return c.json({ error: "Ingresá un precio mayor a cero." }, 400);
 
+  const avisos: string[] = [];
+  const maxFotos = 12;
+
+  type RespuestaCreacion = {
+    id?: string;
+    permalink?: string;
+    message?: string;
+    cause?: Array<{ message?: string; code?: string }>;
+  };
+  type ItemCreado = {
+    id: string;
+    permalink: string | null;
+    pausada: boolean;
+    envio: Awaited<ReturnType<typeof garantizarMercadoEnviosSinFlex>>;
+  };
+
+  // Crea UN ítem en ML y le aplica todo lo posterior (envío sin Flex, pausa,
+  // descripción). Lo usan tanto la publicación simple como cada variante.
+  const crearItem = async (
+    item: Record<string, unknown>,
+    etiqueta: string,
+    opts: { reintentarFamilyName?: boolean } = {},
+  ): Promise<{ ok: true; creado: ItemCreado } | { ok: false; error: string }> => {
+    const pref = etiqueta ? `[${etiqueta}] ` : "";
+    const crear = async () => {
+      const response = await mlFetch(c.env, db, "/items", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(item),
+      });
+      const json = (await response.json().catch(() => ({}))) as RespuestaCreacion;
+      return { response, json };
+    };
+    let { response: r, json: creado } = await crear();
+    const rechazoInicial = JSON.stringify(creado).toLowerCase();
+    if (
+      (!r.ok || !creado.id) &&
+      (rechazoInicial.includes("shipping") || rechazoInicial.includes("lost_me1"))
+    ) {
+      // Algunas cuentas administran ME2 a nivel de vendedor y rechazan `shipping`
+      // en el alta. Reintentamos sin ese bloque, pero la garantía poscreación sigue
+      // siendo obligatoria y deja el ítem pausado si no confirma ME2 sin Flex.
+      delete item.shipping;
+      ({ response: r, json: creado } = await crear());
+      avisos.push(
+        `${pref}Mercado Libre aplicó el envío desde la configuración de la cuenta; se verificó después del alta.`,
+      );
+    }
+    if (
+      (!r.ok || !creado.id) &&
+      opts.reintentarFamilyName &&
+      !item.family_name &&
+      JSON.stringify(creado).toLowerCase().includes("family_name")
+    ) {
+      // Cuenta de User Products: ML pide family_name y genera el título solo.
+      delete item.title;
+      item.family_name = String(body.titulo).trim().slice(0, 60);
+      ({ response: r, json: creado } = await crear());
+      avisos.push(
+        "Mercado Libre pidió un nombre de familia (family_name): se publicó con el título como family_name y ML genera el título final.",
+      );
+    }
+    if (!r.ok || !creado.id) {
+      const detalle =
+        (creado.cause ?? [])
+          .map((x) => x.message || x.code)
+          .filter(Boolean)
+          .join(" · ") ||
+        creado.message ||
+        "error desconocido";
+      // ML a veces devuelve un código genérico ("body.invalid_fields") sin
+      // detalle en cause[]: sumamos siempre el JSON crudo para no perder pistas.
+      return { ok: false, error: `${detalle} — ${JSON.stringify(creado)}`.slice(0, 900) };
+    }
+    const id = creado.id;
+
+    // Flex puede heredarse de la cuenta aunque el payload diga `mode: me2`.
+    // Se quita y se verifica ANTES de pausar, porque la API de Flex rechaza
+    // algunos ítems pausados con `item down`.
+    const envio = await garantizarMercadoEnviosSinFlex(c.env, db, id);
+
+    // Confirmar la pausa antes de informar el resultado. Si la garantía de envío
+    // falló, igualmente se pausa para que nunca quede vendible por accidente.
+    const pausa = await mlFetch(c.env, db, `/items/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "paused" }),
+    }).catch(() => null);
+    if (!pausa?.ok) avisos.push(`${pref}La publicación fue creada, pero Mercado Libre no confirmó la pausa. Revisá su estado desde el enlace antes de continuar.`);
+    if (!envio.ok)
+      avisos.push(
+        `${pref}NO ACTIVAR: no pude confirmar Mercado Envíos sin Flex. ${envio.detalle ?? "Revisá el envío en Mercado Libre."}`,
+      );
+
+    if (body.descripcion?.trim()) {
+      const rd = await mlFetch(c.env, db, `/items/${id}/description`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ plain_text: body.descripcion.trim() }),
+      }).catch(() => null);
+      if (!rd?.ok) avisos.push(`${pref}No se pudo guardar la descripción; cargala a mano.`);
+    }
+
+    return {
+      ok: true,
+      creado: { id, permalink: creado.permalink ?? null, pausada: pausa?.ok ?? false, envio },
+    };
+  };
+
+  // ---- Con variantes: modelo "User Products" (un ítem por variante) ----
+  // La cuenta es de precio por variación: `variations[]` ya no existe ni se
+  // manda `title`. Cada variante es su propio ítem con el mismo family_name y
+  // ML los agrupa en una familia solo.
+  if (conVariantes) {
+    const attrId = body.variantes?.atributo_id?.trim();
+    const attrNombre = body.variantes?.atributo_nombre?.trim() || "Variante";
+    const familyName = (body.family_name?.trim() || body.titulo.trim()).slice(0, 60);
+    if (!attrId)
+      avisos.push(
+        "Sin un atributo de Mercado Libre para el eje, las variantes pueden no agruparse en una sola familia.",
+      );
+
+    const creados: Array<{ variante: string } & ItemCreado> = [];
+    let fotosRecortadas = false;
+    for (const v of variantesRaw) {
+      const valor = v.value_name.trim();
+      const eje = attrId ? { id: attrId, value_name: valor } : { name: attrNombre, value_name: valor };
+      // el valor de la variante pisa al atributo común si tiene el mismo id
+      const attrsComunes = attrId ? atributos.filter((a) => a.id !== attrId) : atributos;
+      const todas = [...new Set([...(v.imagenes ?? []).filter(Boolean), ...fotosProducto])];
+      if (todas.length > maxFotos) fotosRecortadas = true;
+      const item: Record<string, unknown> = {
+        category_id: body.categoria_id,
+        currency_id: "ARS",
+        buying_mode: "buy_it_now",
+        condition: "new",
+        listing_type_id: "gold_special",
+        family_name: familyName,
+        price: v.precio ?? body.precio,
+        available_quantity: Math.max(v.stock ?? body.stock ?? 1, 1),
+        pictures: todas.slice(0, maxFotos).map((source) => ({ source })),
+        attributes: [...attrsComunes, eje],
+        shipping: mercadoEnviosSinFlex(false),
+      };
+      const res = await crearItem(item, valor);
+      if (!res.ok) {
+        const previos = creados.length
+          ? ` Ya se crearon (quedan pausadas): ${creados
+              .map((x) => `${x.variante} → ${x.id}${x.permalink ? ` (${x.permalink})` : ""}`)
+              .join("; ")}.`
+          : "";
+        return c.json(
+          { error: `Falló la variante "${valor}": ${res.error}.${previos}`.slice(0, 1800) },
+          502,
+        );
+      }
+      creados.push({ variante: valor, ...res.creado });
+    }
+    if (fotosRecortadas)
+      avisos.push(
+        "Mercado Libre acepta hasta 12 fotos por publicación; en alguna variante se recortaron las últimas.",
+      );
+
+    try {
+      for (const x of creados) await syncOneItem(c.env, db, x.id);
+      await derivarCatalogo(db);
+    } catch (e) {
+      avisos.push(`sync interno: ${(e as Error).message}`);
+    }
+
+    const primero = creados[0];
+    return c.json({
+      ml_item_id: primero.id,
+      permalink: primero.permalink,
+      pausada: creados.every((x) => x.pausada),
+      envio_verificado: creados.every((x) => x.envio.ok),
+      modo_envio: primero.envio.mode,
+      flex: primero.envio.flex,
+      variantes: creados.length,
+      items: creados.map((x) => ({
+        variante: x.variante,
+        ml_item_id: x.id,
+        permalink: x.permalink,
+        pausada: x.pausada,
+        envio_verificado: x.envio.ok,
+      })),
+      avisos,
+    });
+  }
+
+  // ---- Sin variantes: un solo ítem ----
+  const poolUnico = [...new Set(fotosProducto)];
+  if (poolUnico.length > maxFotos)
+    avisos.push(
+      "Mercado Libre acepta hasta 12 fotos por publicación; se recortaron las últimas.",
+    );
   const familyName = body.family_name?.trim();
   // En User Products, ML genera title desde family_name y atributos.
   const item: Record<string, unknown> = {
@@ -360,110 +558,16 @@ ia.post("/publicar", async (c) => {
     buying_mode: "buy_it_now",
     condition: "new",
     listing_type_id: "gold_special",
-    pictures: poolUnico.map((source) => ({ source })),
+    pictures: poolUnico.slice(0, maxFotos).map((source) => ({ source })),
     attributes: atributos,
     shipping: mercadoEnviosSinFlex(false),
     ...(familyName ? { family_name: familyName } : {}),
+    price: body.precio,
+    available_quantity: Math.max(body.stock ?? 1, 1),
   };
-
-  const avisos: string[] = [];
-  if (poolFotos.length > 12)
-    avisos.push(
-      "Mercado Libre acepta hasta 12 fotos por publicación; se recortaron las últimas.",
-    );
-
-  if (conVariantes) {
-    const attrId = body.variantes?.atributo_id?.trim();
-    const attrNombre = body.variantes?.atributo_nombre?.trim() || "Variante";
-    item.variations = variantesRaw.map((v) => {
-      const combo = attrId
-        ? { id: attrId, value_name: v.value_name.trim() }
-        : { name: attrNombre, value_name: v.value_name.trim() };
-      const pics = (v.imagenes ?? []).filter(Boolean);
-      return {
-        attribute_combinations: [combo],
-        available_quantity: Math.max(v.stock ?? body.stock ?? 1, 1),
-        price: v.precio ?? body.precio,
-        ...(pics.length ? { picture_ids: pics } : {}),
-      };
-    });
-  } else {
-    item.price = body.precio;
-    item.available_quantity = Math.max(body.stock ?? 1, 1);
-  }
-
-  type RespuestaCreacion = {
-    id?: string;
-    permalink?: string;
-    message?: string;
-    cause?: Array<{ message?: string; code?: string }>;
-  };
-  const crear = async () => {
-    const response = await mlFetch(c.env, db, "/items", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(item),
-    });
-    const json = (await response.json().catch(() => ({}))) as RespuestaCreacion;
-    return { response, json };
-  };
-  let { response: r, json: creado } = await crear();
-  const rechazoInicial = JSON.stringify(creado).toLowerCase();
-  if (
-    (!r.ok || !creado.id) &&
-    (rechazoInicial.includes("shipping") || rechazoInicial.includes("lost_me1"))
-  ) {
-    // Algunas cuentas administran ME2 a nivel de vendedor y rechazan `shipping`
-    // en el alta. Reintentamos sin ese bloque, pero la garantía poscreación sigue
-    // siendo obligatoria y deja el ítem pausado si no confirma ME2 sin Flex.
-    delete item.shipping;
-    ({ response: r, json: creado } = await crear());
-    avisos.push(
-      "Mercado Libre aplicó el envío desde la configuración de la cuenta; se verificó después del alta.",
-    );
-  }
-  if (!r.ok || !creado.id) {
-    const detalle =
-      (creado.cause ?? [])
-        .map((x) => x.message || x.code)
-        .filter(Boolean)
-        .join(" · ") ||
-      creado.message ||
-      "error desconocido";
-    // ML a veces devuelve un código genérico ("body.invalid_fields") sin
-    // detalle en cause[]: sumamos siempre el JSON crudo para no perder pistas.
-    return c.json(
-      { error: `${detalle} — ${JSON.stringify(creado)}`.slice(0, 900) },
-      502,
-    );
-  }
-
-  // Flex puede heredarse de la cuenta aunque el payload diga `mode: me2`.
-  // Se quita y se verifica ANTES de pausar, porque la API de Flex rechaza
-  // algunos ítems pausados con `item down`.
-  const envio = await garantizarMercadoEnviosSinFlex(c.env, db, creado.id);
-
-  // Confirmar la pausa antes de informar el resultado. Si la garantía de envío
-  // falló, igualmente se pausa para que nunca quede vendible por accidente.
-  const pausa = await mlFetch(c.env, db, `/items/${creado.id}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ status: "paused" }),
-  }).catch(() => null);
-  if (!pausa?.ok) avisos.push("La publicación fue creada, pero Mercado Libre no confirmó la pausa. Revisá su estado desde el enlace antes de continuar.");
-  if (!envio.ok)
-    avisos.push(
-      `NO ACTIVAR: no pude confirmar Mercado Envíos sin Flex. ${envio.detalle ?? "Revisá el envío en Mercado Libre."}`,
-    );
-
-  if (body.descripcion?.trim()) {
-    const rd = await mlFetch(c.env, db, `/items/${creado.id}/description`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ plain_text: body.descripcion.trim() }),
-    }).catch(() => null);
-    if (!rd?.ok) avisos.push("No se pudo guardar la descripción; cargala a mano.");
-  }
+  const res = await crearItem(item, "", { reintentarFamilyName: true });
+  if (!res.ok) return c.json({ error: res.error }, 502);
+  const { creado } = res;
 
   try {
     await syncOneItem(c.env, db, creado.id);
@@ -474,14 +578,79 @@ ia.post("/publicar", async (c) => {
 
   return c.json({
     ml_item_id: creado.id,
-    permalink: creado.permalink ?? null,
-    pausada: pausa?.ok ?? false,
-    envio_verificado: envio.ok,
-    modo_envio: envio.mode,
-    flex: envio.flex,
-    variantes: conVariantes ? variantesRaw.length : 0,
+    permalink: creado.permalink,
+    pausada: creado.pausada,
+    envio_verificado: creado.envio.ok,
+    modo_envio: creado.envio.mode,
+    flex: creado.envio.flex,
+    variantes: 0,
     avisos,
   });
+});
+
+// ---------------------------------------------------------------------------
+// Fotos profesionales con IA (Nano Banana Pro) para cada variante: 3 tomas
+// (portada sobre blanco, detalle, ambiente) a partir de las fotos caseras.
+// ---------------------------------------------------------------------------
+
+type TipoFotoPro = "portada" | "detalle" | "ambiente";
+
+function promptFotoPro(tipo: TipoFotoPro, producto?: string, variante?: string): string {
+  const base: Record<TipoFotoPro, string> = {
+    portada:
+      "Professional e-commerce cover photo for a Mercado Libre listing. The product is perfectly clean and smooth (a garment is laid perfectly flat and neatly ironed, with no wrinkles or creases), centered and filling about 85% of a square frame, on a pure white (#FFFFFF) seamless background, with a soft, realistic contact shadow under it and bright, even studio lighting.",
+    detalle:
+      "Professional close-up product photo of the main printed design of the same product, filling about 70% of the frame, sharp focus with visible fabric or material texture, smooth surface with no wrinkles, soft studio light with gentle realistic shadows, on a pure white or very light neutral background.",
+    ambiente:
+      "Professional lifestyle product photo of the same product in a clean, minimal setting suited to it (for example a garment neatly folded or hanging on a light wooden hanger against an off-white wall, or an accessory on a light wooden table), soft natural window light with realistic shadows, smooth surfaces with no wrinkles, the printed design clearly visible.",
+  };
+  const reglas =
+    "Reproduce the product and its printed design EXACTLY as in the first reference photo: same artwork, faces, text, colors, proportions and placement. Do not redraw, simplify, translate or invent any element of the design. If several references are given, the first one shows the view to reproduce and the others only help with details. True-to-life neutral colors: remove any yellow or warm color cast from the homemade photo. No text, logos, watermarks, hands, mannequins or extra props unless stated.";
+  return [
+    base[tipo],
+    reglas,
+    producto ? `Product: ${producto}` : "",
+    variante ? `Variant: ${variante}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Encarga las 3 fotos en paralelo; el panel consulta cada tarea aparte.
+ia.post("/fotos-pro/encargar", async (c) => {
+  const body = await c.req
+    .json<{ imagenes?: string[]; producto?: string; variante?: string }>()
+    .catch(() => ({}) as { imagenes?: string[]; producto?: string; variante?: string });
+  const imagenes = [...new Set((body.imagenes ?? []).filter(Boolean))].slice(0, 8);
+  if (!imagenes.length)
+    return c.json({ error: "Falta al menos una foto de referencia." }, 400);
+  const tipos: TipoFotoPro[] = ["portada", "detalle", "ambiente"];
+  try {
+    const tareas = await Promise.all(
+      tipos.map(async (tipo) => ({
+        tipo,
+        taskId: await encargarEdicionPro(c.env, {
+          prompt: promptFotoPro(tipo, body.producto?.trim(), body.variante?.trim()),
+          imageUrls: imagenes,
+          aspectRatio: "1:1",
+        }),
+      })),
+    );
+    return c.json({ tareas, costo_usd: tipos.length * costoUsd(MODELO_EDICION) });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 502);
+  }
+});
+
+// Consulta una tarea; al terminar deja la foto permanente en Storage (la URL
+// de kie.ai vence en ~24 h).
+ia.get("/fotos-pro/:taskId", async (c) => {
+  const tarea = await estadoTarea(c.env, c.req.param("taskId")).catch(
+    () => ({ estado: "generando" }) as const,
+  );
+  if (tarea.estado !== "listo") return c.json(tarea);
+  const url = await guardarFotoVariante(supa(c.env), tarea.url);
+  return c.json({ estado: "listo", url });
 });
 
 // Aplica cambios a Mercado Libre. Se llama SÓLO cuando Elias confirma en el panel.
@@ -586,11 +755,15 @@ async function guardarFotoVariante(
   try {
     const res = await fetch(url);
     const bytes = await res.arrayBuffer();
+    // Nano Banana Pro entrega jpg; nano-banana-edit, png.
+    const tipo = (res.headers.get("content-type") ?? "").includes("jpeg") || /\.jpe?g(\?|$)/i.test(url)
+      ? "image/jpeg"
+      : "image/png";
     const mes = new Date().toISOString().slice(0, 7);
-    const path = `${mes}/variante-${crypto.randomUUID()}.png`;
+    const path = `${mes}/variante-${crypto.randomUUID()}.${tipo === "image/jpeg" ? "jpg" : "png"}`;
     const up = await db.storage
       .from("publicaciones")
-      .upload(path, bytes, { contentType: "image/png", upsert: false });
+      .upload(path, bytes, { contentType: tipo, upsert: false });
     if (!up.error)
       return db.storage.from("publicaciones").getPublicUrl(path).data.publicUrl;
   } catch {

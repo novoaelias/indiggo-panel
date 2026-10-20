@@ -220,10 +220,13 @@ Flex opt-in, and verify **Mercado Envíos without Flex before the item may be ac
 
 ### Known MercadoLibre constraints
 
-- The account uses the "User Products / Price per Variation" model. Re-publishing a listing
-  **with variants** by API is refused in catalog categories (`variations[]` not accepted on
-  create; `family_name` required); those are redone from the ML web UI. `worker/routes/seo.ts`
-  only re-publishes variant-less listings and surfaces ML's error verbatim otherwise.
+- The account uses the "User Products / Price per Variation" model: `variations[]` and `title`
+  are rejected and `family_name` is required. A **new** listing with variants
+  (`POST /api/ia/publicar`) is created as one paused item per variant, all with the same
+  `family_name` and the varying attribute in each item's `attributes`; ML groups them into one
+  family. Re-publishing an **existing** listing with variants by API is still not supported in
+  catalog categories (redone from the ML web UI): `worker/routes/seo.ts` only re-publishes
+  variant-less listings and surfaces ML's error verbatim otherwise.
 - The Flex → Google Sheets "planilla de reparto" module is **suspended**
   (`SHEETS_SUSPENDIDO = true` in `worker/lib/sheets.ts`); `registrarEnvioFlex` is a no-op. Code
   is intact for reactivation.

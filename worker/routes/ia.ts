@@ -675,7 +675,7 @@ ia.post("/guias-talles", async (c) => {
     if (!f.talle?.trim()) return c.json({ error: `La fila ${i + 1} no tiene talle.` }, 400);
     if (!f.equivalencia_id)
       return c.json({ error: `Elegí la equivalencia del talle ${etiqueta}.` }, 400);
-    if (!positivo(f.pecho_persona_cm))
+    if (f.pecho_persona_cm != null && !positivo(f.pecho_persona_cm))
       return c.json(
         { error: `El contorno de pecho del talle ${etiqueta} tiene que ser mayor a cero.` },
         400,
@@ -709,6 +709,18 @@ ia.post("/guias-talles", async (c) => {
     marca,
   );
 
+  // Sin `measure_type`, ML toma la guía como de medidas del cuerpo y rechaza las
+  // de la prenda (GARMENT_*) con invalid_row_attribute. Las de la prenda van
+  // siempre; el contorno de pecho de la persona es opcional, pero en todas las
+  // filas o en ninguna (MIXED_MEASURE exige las dos clases en cada fila).
+  const conPecho = filasIn.filter((f) => f.pecho_persona_cm != null).length;
+  if (conPecho > 0 && conPecho < filasIn.length)
+    return c.json(
+      { error: "El contorno de pecho de la persona tiene que ir en todos los talles o en ninguno." },
+      400,
+    );
+  const measureType = conPecho ? "MIXED_MEASURE" : "CLOTHING_MEASURE";
+
   const cm = (n: number) => ({ name: `${n} cm`, struct: { number: n, unit: "cm" } });
   const filas: Array<{ attributes: unknown[] }> = [];
   for (const f of filasIn) {
@@ -719,10 +731,12 @@ ia.post("/guias-talles", async (c) => {
       attributes: [
         { id: "SIZE", values: [{ name: talle }] },
         { id: "FILTRABLE_SIZE", values: [{ id: eq.id, name: eq.name }] },
-        { id: "CHEST_CIRCUMFERENCE_FROM", values: [cm(f.pecho_persona_cm as number)] },
         { id: "GARMENT_CHEST_WIDTH_FROM", values: [cm(f.ancho_prenda_cm as number)] },
         ...(f.largo_prenda_cm
           ? [{ id: "GARMENT_LENGTH_FROM", values: [cm(f.largo_prenda_cm)] }]
+          : []),
+        ...(f.pecho_persona_cm != null
+          ? [{ id: "CHEST_CIRCUMFERENCE_FROM", values: [cm(f.pecho_persona_cm)] }]
           : []),
       ],
     });
@@ -732,6 +746,7 @@ ia.post("/guias-talles", async (c) => {
     names: { MLA: nombre },
     domain_id: dominio,
     site_id: "MLA",
+    measure_type: measureType,
     main_attribute: { attributes: [{ site_id: "MLA", id: "SIZE" }] },
     attributes: [
       { id: "GENDER", values: [generoId ? { id: generoId, name: genero } : { name: genero }] },
@@ -781,6 +796,8 @@ interface PublicarBody {
   family_name?: string;
   guia_talles?: { id: string };
   talle_fila?: { id: string; talle: string };
+  // Sólo valida contra ML (/items/validate) y no crea nada.
+  solo_validar?: boolean;
   variantes?: {
     atributo_id?: string;
     atributo_nombre?: string;
@@ -966,6 +983,51 @@ ia.post("/publicar", async (c) => {
     };
   };
 
+  // Pregunta a ML si aceptaría el ítem SIN crearlo (/items/validate responde 204).
+  // Aplica sobre `item` los mismos ajustes que crearItem (sin `shipping`,
+  // family_name en vez de title) para que lo validado sea lo que se crea.
+  const validarItem = async (
+    item: Record<string, unknown>,
+    opts: { reintentarFamilyName?: boolean } = {},
+  ): Promise<string | null> => {
+    const validar = async () => {
+      const r = await mlFetch(c.env, db, "/items/validate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(item),
+      });
+      if (r.ok) return null;
+      const texto = await r.text();
+      let j: RespuestaCreacion = {};
+      try {
+        j = JSON.parse(texto) as RespuestaCreacion;
+      } catch {
+        /* se usa el texto crudo */
+      }
+      const causas = (j.cause ?? []) as Array<{ message?: string; code?: string; type?: string }>;
+      // Los avisos (type "warning") no impiden crear el ítem.
+      const errores = causas.filter((x) => x.type !== "warning");
+      if (causas.length && !errores.length) return null;
+      const detalle =
+        errores.map((x) => x.message || x.code).filter(Boolean).join(" · ") ||
+        j.message ||
+        texto ||
+        `HTTP ${r.status}`;
+      return `${detalle} — ${texto}`.slice(0, 900);
+    };
+    let error = await validar();
+    if (error && /shipping|lost_me1/i.test(error) && item.shipping) {
+      delete item.shipping;
+      error = await validar();
+    }
+    if (error && opts.reintentarFamilyName && !item.family_name && /family_name/i.test(error)) {
+      delete item.title;
+      item.family_name = String(body.titulo).trim().slice(0, 60);
+      error = await validar();
+    }
+    return error;
+  };
+
   // ---- Con variantes: modelo "User Products" (un ítem por variante) ----
   // La cuenta es de precio por variación: `variations[]` ya no existe ni se
   // manda `title`. Cada variante es su propio ítem con el mismo family_name y
@@ -979,8 +1041,8 @@ ia.post("/publicar", async (c) => {
         "Sin un atributo de Mercado Libre para el eje, las variantes pueden no agruparse en una sola familia.",
       );
 
-    const creados: Array<{ variante: string } & ItemCreado> = [];
     let fotosRecortadas = false;
+    const aCrear: Array<{ valor: string; item: Record<string, unknown> }> = [];
     for (const v of variantesRaw) {
       const valor = v.value_name.trim();
       const eje = attrId ? { id: attrId, value_name: valor } : { name: attrNombre, value_name: valor };
@@ -1001,6 +1063,27 @@ ia.post("/publicar", async (c) => {
         attributes: conGuiaYEdad([...attrsComunes, eje], v.talle_fila),
         shipping: mercadoEnviosSinFlex(false),
       };
+      aCrear.push({ valor, item });
+    }
+
+    // Primero se validan TODAS: si una no pasa, no se crea ninguna (antes quedaban
+    // variantes sueltas creadas y un reintento las duplicaba).
+    const rechazos: string[] = [];
+    for (const { valor, item } of aCrear) {
+      const error = await validarItem(item);
+      if (error) rechazos.push(`"${valor}": ${error}`);
+    }
+    if (rechazos.length)
+      return c.json(
+        {
+          error: `Mercado Libre no aceptaría la publicación; no se creó nada. ${rechazos.join(" | ")}`.slice(0, 1800),
+        },
+        502,
+      );
+    if (body.solo_validar) return c.json({ ok: true, validadas: aCrear.length });
+
+    const creados: Array<{ variante: string } & ItemCreado> = [];
+    for (const { valor, item } of aCrear) {
       const res = await crearItem(item, valor);
       if (!res.ok) {
         const previos = creados.length
@@ -1069,6 +1152,10 @@ ia.post("/publicar", async (c) => {
     price: body.precio,
     available_quantity: Math.max(body.stock ?? 1, 1),
   };
+  const rechazo = await validarItem(item, { reintentarFamilyName: true });
+  if (rechazo)
+    return c.json({ error: `Mercado Libre no aceptaría la publicación; no se creó nada. ${rechazo}` }, 502);
+  if (body.solo_validar) return c.json({ ok: true, validadas: 1 });
   const res = await crearItem(item, "", { reintentarFamilyName: true });
   if (!res.ok) return c.json({ error: res.error }, 502);
   const { creado } = res;

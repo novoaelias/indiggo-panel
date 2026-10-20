@@ -1335,6 +1335,8 @@ const numCm = (s: string) => Number(s.trim().replace(",", "."));
 
 const inputChico =
   "rounded-md border border-ink/12 px-2 py-1 text-[13px] outline-none focus:border-accent";
+const celdaGuia = "flex min-w-0 flex-col gap-0.5";
+const rotuloGuia = "text-[10.5px] text-ink/45";
 
 // Sección "Guía de talles": ML la pide para ropa. Elegir una existente o crear
 // una nueva, y asignar el talle de cada variante (o uno solo si no hay variantes).
@@ -1389,13 +1391,19 @@ function GuiaTallesSeccion({
     for (const [i, f] of filas.entries()) {
       if (!f.talle.trim()) return setErr(`Falta el talle de la fila ${i + 1}.`);
       if (!f.equivalencia) return setErr(`Elegí la equivalencia del talle ${f.talle.trim()}.`);
-      if (!(numCm(f.pecho) > 0))
-        return setErr(`Cargá el contorno de pecho (cm) del talle ${f.talle.trim()}.`);
       if (!(numCm(f.ancho) > 0))
         return setErr(`Cargá el ancho de pecho de la prenda (cm) del talle ${f.talle.trim()}.`);
       if (f.largo.trim() && !(numCm(f.largo) > 0))
         return setErr(`El largo del talle ${f.talle.trim()} tiene que ser mayor a cero.`);
+      if (f.pecho.trim() && !(numCm(f.pecho) > 0))
+        return setErr(`El contorno de pecho del talle ${f.talle.trim()} tiene que ser mayor a cero.`);
     }
+    // ML no acepta una guía con medidas del cuerpo en algunos talles y no en otros.
+    const conPecho = filas.filter((f) => f.pecho.trim()).length;
+    if (conPecho > 0 && conPecho < filas.length)
+      return setErr(
+        "El contorno de pecho de la persona es opcional, pero si lo cargás tiene que ir en todos los talles.",
+      );
     if (
       !window.confirm(
         `Se va a crear la guía "${nombreLimpio}" con ${filas.length} talle${filas.length === 1 ? "" : "s"} en tu cuenta de Mercado Libre. ¿Confirmás?`,
@@ -1414,9 +1422,9 @@ function GuiaTallesSeccion({
           filas: filas.map((f) => ({
             talle: f.talle.trim(),
             equivalencia_id: f.equivalencia,
-            pecho_persona_cm: numCm(f.pecho),
             ancho_prenda_cm: numCm(f.ancho),
             largo_prenda_cm: f.largo.trim() ? numCm(f.largo) : undefined,
+            pecho_persona_cm: f.pecho.trim() ? numCm(f.pecho) : undefined,
           })),
         }),
       });
@@ -1486,53 +1494,65 @@ function GuiaTallesSeccion({
             />
           </label>
           <div className="text-[11.5px] text-ink/45">
-            Medidas en cm. Tienen que crecer de un talle al siguiente.
+            Medidas de la remera en cm, apoyada plana: ancho de axila a axila y largo desde el hombro.
+            Tienen que crecer de un talle al siguiente. El contorno de pecho de la persona es opcional.
           </div>
           {filas.map((f, i) => (
             <div key={i} className="grid grid-cols-2 gap-2 border-t hairline pt-2 sm:grid-cols-6">
-              <input
-                value={f.talle}
-                onChange={(e) => cambiarFila(i, { talle: e.target.value })}
-                placeholder="Talle (ej: M)"
-                className={inputChico}
-              />
-              <select
-                value={f.equivalencia}
-                onChange={(e) => cambiarFila(i, { equivalencia: e.target.value })}
-                className={inputChico}
-                title="Equivalencia"
-              >
-                <option value="">Equivale a…</option>
-                {info.equivalencias.map((q) => (
-                  <option key={q.id} value={q.id}>
-                    {q.name}
-                  </option>
-                ))}
-              </select>
-              <input
-                value={f.pecho}
-                onChange={(e) => cambiarFila(i, { pecho: e.target.value })}
-                inputMode="decimal"
-                placeholder="Pecho persona"
-                title="Contorno de pecho de la persona (cm)"
-                className={inputChico}
-              />
-              <input
-                value={f.ancho}
-                onChange={(e) => cambiarFila(i, { ancho: e.target.value })}
-                inputMode="decimal"
-                placeholder="Ancho prenda"
-                title="Ancho de pecho de la prenda (cm)"
-                className={inputChico}
-              />
-              <input
-                value={f.largo}
-                onChange={(e) => cambiarFila(i, { largo: e.target.value })}
-                inputMode="decimal"
-                placeholder="Largo (opcional)"
-                title="Largo de la prenda (cm), opcional"
-                className={inputChico}
-              />
+              <label className={celdaGuia}>
+                <span className={rotuloGuia}>Talle</span>
+                <input
+                  value={f.talle}
+                  onChange={(e) => cambiarFila(i, { talle: e.target.value })}
+                  placeholder="ej: M"
+                  className={inputChico}
+                />
+              </label>
+              <label className={celdaGuia}>
+                <span className={rotuloGuia}>Equivale a</span>
+                <select
+                  value={f.equivalencia}
+                  onChange={(e) => cambiarFila(i, { equivalencia: e.target.value })}
+                  className={inputChico}
+                >
+                  <option value="">Elegí…</option>
+                  {info.equivalencias.map((q) => (
+                    <option key={q.id} value={q.id}>
+                      {q.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className={celdaGuia}>
+                <span className={rotuloGuia}>Ancho remera</span>
+                <input
+                  value={f.ancho}
+                  onChange={(e) => cambiarFila(i, { ancho: e.target.value })}
+                  inputMode="decimal"
+                  placeholder="axila a axila"
+                  className={inputChico}
+                />
+              </label>
+              <label className={celdaGuia}>
+                <span className={rotuloGuia}>Largo remera</span>
+                <input
+                  value={f.largo}
+                  onChange={(e) => cambiarFila(i, { largo: e.target.value })}
+                  inputMode="decimal"
+                  placeholder="opcional"
+                  className={inputChico}
+                />
+              </label>
+              <label className={celdaGuia}>
+                <span className={rotuloGuia}>Pecho persona</span>
+                <input
+                  value={f.pecho}
+                  onChange={(e) => cambiarFila(i, { pecho: e.target.value })}
+                  inputMode="decimal"
+                  placeholder="opcional"
+                  className={inputChico}
+                />
+              </label>
               {filas.length > 1 && (
                 <button
                   type="button"

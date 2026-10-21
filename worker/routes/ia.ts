@@ -369,7 +369,9 @@ ia.put("/borrador", async (c) => {
     new Blob([JSON.stringify({ ...(cuerpo as object), guardado_at })], {
       type: "application/json",
     }),
-    { contentType: "application/json", upsert: true },
+    // Sin esto Storage lo sirve con max-age=3600 y al recargar volvía una copia
+    // de hasta una hora atrás.
+    { contentType: "application/json", upsert: true, cacheControl: "0" },
   );
   if (up.error) return c.json({ error: up.error.message }, 502);
   return c.json({ ok: true, guardado_at });

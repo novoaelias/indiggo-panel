@@ -1,4 +1,4 @@
-﻿# Indiggo Panel
+# Indiggo Panel
 
 Panel de administración privado para una tienda de MercadoLibre: publicaciones con borradores de IA y revisión humana, catálogo, stock, producción, pedidos, preguntas y métricas.
 
